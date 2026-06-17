@@ -1,0 +1,24 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager / Xcode build output
+.build/
+.swiftpm/
+DerivedData/
+*.dSYM/
+
+# App and release artifacts are uploaded to GitHub Releases, not committed.
+dist/
+*.zip
+
+# Xcode user state
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Local editor and environment files
+.env
+.env.*
+.vscode/
+.idea/
