@@ -1,50 +1,52 @@
 # Krill Floating Ball
 
+[English](README.en.md) | 中文简体
+
 Krill Floating Ball 是一个低开销的 macOS 原生悬浮球应用，用于在桌面置顶查看 Krill AI 套餐额度、今日统计和钱包余额。
 
-> This is an unofficial desktop companion for Krill AI usage monitoring. It is not affiliated with or endorsed by Krill AI.
+> 这是一个用于查看 Krill AI 使用情况的非官方桌面工具，与 Krill AI 官方无关联，也不代表 Krill AI 官方背书。
 
-## Screenshots
+## 截图
 
-| Menu Bar Icon | Menu Actions | Floating Ball |
+| 菜单栏图标 | 菜单栏功能 | 悬浮球 |
 | --- | --- | --- |
-| <img src="docs/images/menubar-icon.png" width="180" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> | <img src="docs/images/floating-ball.png" width="140" alt="Floating ball"> |
+| <img src="docs/images/menubar-icon.png" width="180" alt="菜单栏图标"> | <img src="docs/images/menubar-menu.png" width="240" alt="菜单栏功能"> | <img src="docs/images/floating-ball.png" width="140" alt="悬浮球"> |
 
-| Expanded Panel | Krill Account Comparison |
+| 展开栏 | Krill 个人中心数据对比 |
 | --- | --- |
-| <img src="docs/images/expanded-panel.png" width="520" alt="Expanded panel"> | <img src="docs/images/krill-profile.png" width="520" alt="Krill account comparison"> |
+| <img src="docs/images/expanded-panel.png" width="520" alt="悬浮球展开栏"> | <img src="docs/images/krill-profile.png" width="520" alt="Krill 个人中心数据对比"> |
 
-| CPU Usage | Memory Usage |
+| CPU 开销 | 内存开销 |
 | --- | --- |
-| <img src="docs/images/cpu-usage.png" width="520" alt="CPU usage"> | <img src="docs/images/memory-usage.png" width="520" alt="Memory usage"> |
+| <img src="docs/images/cpu-usage.png" width="520" alt="CPU 开销"> | <img src="docs/images/memory-usage.png" width="520" alt="内存开销"> |
 
-## Features
+## 功能
 
-- Native Swift/AppKit implementation with no Dock icon and a lightweight menu bar entry.
-- Always-on-top draggable floating ball, sized at 80px.
-- Liquid quota indicator: the fill level follows weekly remaining quota, with stronger colors and pulse effects at low quota.
-- Hover panel showing today's spend, request count, cache rate, wallet balance, refresh time, and all currently active subscriptions.
-- Auto-refresh interval is configurable from the menu bar. The default interval is 30 seconds.
-- Manual refresh, token setup, token clearing, and quit actions are available from the menu bar.
-- Failed refreshes keep the previous successful data and do not overwrite the last successful refresh time.
-- Krill API token is stored in macOS Keychain, not in source files or local config files.
+- Swift/AppKit 原生实现，无 Dock 图标，菜单栏常驻。
+- 80px 桌面置顶悬浮球，可拖动。
+- 液体额度指示器：水位跟随周剩余额度百分比变化，低额度时颜色和闪烁效果更醒目。
+- 鼠标悬浮时展示今日统计、钱包余额、刷新时间和所有生效套餐。
+- 支持在菜单栏设置自动刷新间隔，默认每 30 秒刷新一次。
+- 菜单栏支持手动刷新、设置 Token、清除 Token 和退出应用。
+- 刷新失败时保留上一次成功数据，并且不会覆盖上一次成功刷新时间。
+- Krill API Token 保存到 macOS Keychain，不写入源码或本地配置文件。
 
-## Requirements
+## 系统要求
 
-- macOS 13.0 or later.
-- Apple Silicon Mac for the prebuilt release asset.
-- Swift 6.0 or later if building from source.
+- macOS 13.0 或更高版本。
+- 预构建 Release 包当前面向 Apple Silicon Mac。
+- 从源码构建需要 Swift 6.0 或更高版本。
 
-## Install From Release
+## 下载安装
 
-1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.1.0-macOS-arm64.zip`.
-3. Open `Krill Floating Ball.app`.
-4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
+1. 从 [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest) 下载最新 zip。
+2. 解压 `Krill-Floating-Ball-v0.1.0-macOS-arm64.zip`。
+3. 打开 `Krill Floating Ball.app`。
+4. 首次启动时输入 Krill API Token，或从菜单栏选择 `设置 Krill Token...`。
 
-The current app is ad-hoc signed but not notarized with an Apple Developer ID. If macOS blocks the first launch, right-click the app and choose `Open`, or allow it in `System Settings -> Privacy & Security`.
+当前应用已做 ad-hoc 签名，但没有使用 Apple Developer ID 公证。首次打开时，如果 macOS 阻止启动，可以右键点击 App 选择 `打开`，或在 `系统设置 -> 隐私与安全性` 中允许打开。
 
-## Build From Source
+## 从源码构建
 
 ```bash
 git clone https://github.com/lightconelab/krill-floating-ball.git
@@ -53,40 +55,40 @@ cd krill-floating-ball
 open "dist/Krill Floating Ball.app"
 ```
 
-To produce the release zip locally:
+本地生成 Release zip：
 
 ```bash
 ./scripts/package_release.sh
 ```
 
-The packaged app will be written to `dist/`.
+构建产物会输出到 `dist/` 目录。
 
-## Usage
+## 使用方式
 
-1. Launch `Krill Floating Ball.app`.
-2. Enter your Krill API token when prompted, or choose `设置 Krill Token...` from the menu bar.
-3. Drag the floating ball to the position you prefer.
-4. Hover over the ball to inspect today's usage, wallet balance, and active subscriptions.
-5. Use the menu bar to refresh manually, change the auto-refresh interval, clear the token, or quit the app.
+1. 启动 `Krill Floating Ball.app`。
+2. 按提示输入 Krill API Token，或从菜单栏选择 `设置 Krill Token...`。
+3. 拖动悬浮球到合适的位置。
+4. 鼠标悬浮在球体上查看今日统计、钱包余额和生效套餐。
+5. 通过菜单栏手动刷新、修改自动刷新间隔、清除 Token 或退出应用。
 
-## Data Scope
+## 数据口径
 
-- Active subscriptions are filtered by `active = true` and the current time being within `subscription_start_at` and `subscription_end_at`.
-- Weekly quota aggregates all active subscriptions.
-- Monthly quota is calculated for monthly subscriptions using `quota.daily_limit_usd * 4`.
-- Today's statistics are requested from the local day's `00:00:00` to the current time, using the user's current time zone.
-- If an API refresh fails, the app waits for the next scheduled refresh or manual refresh and keeps the last successful refresh timestamp unchanged.
+- 生效套餐会按 `active = true` 且当前时间位于 `subscription_start_at` 与 `subscription_end_at` 之间筛选。
+- 周额度会聚合所有当前生效套餐。
+- 月套餐的月额度按 `quota.daily_limit_usd * 4` 计算。
+- 今日统计按用户本机时区的自然日 `00:00:00` 到当前时间请求。
+- 如果接口刷新失败，应用会等待下一次自动刷新或手动刷新，并保持上一次成功刷新时间不变。
 
-## Privacy
+## 隐私说明
 
-- The app calls Krill APIs directly from your Mac.
-- The API token is saved in macOS Keychain.
-- The repository does not include tokens, secrets, analytics, telemetry, or crash reporting.
+- 应用直接从用户 Mac 调用 Krill API。
+- API Token 保存到 macOS Keychain。
+- 仓库不包含 Token、密钥、埋点、遥测或崩溃上报。
 
-## Development Notes
+## 开发说明
 
-The release artifact is intentionally not committed to Git. Build outputs are ignored via `.gitignore`; downloadable app bundles are distributed through GitHub Releases.
+Release 产物不会提交到 Git 仓库。`.build/`、`dist/` 和 zip 包已通过 `.gitignore` 排除；可下载的 App Bundle 通过 GitHub Releases 分发。
 
-## License
+## 许可证
 
-MIT. See [LICENSE](LICENSE).
+MIT。详见 [LICENSE](LICENSE)。
