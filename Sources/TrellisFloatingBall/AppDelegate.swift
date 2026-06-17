@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keychain = KeychainStore(
         service: "com.liguanqin.trellis-floating-ball",
         account: "krill-api-token"
@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var floatingController = FloatingBallController(store: usageStore)
     private var statusItem: NSStatusItem?
     private var refreshIntervalMenuItem: NSMenuItem?
+    private var launchAtLoginMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -50,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let intervalItem = NSMenuItem(title: refreshIntervalTitle(), action: #selector(setRefreshInterval), keyEquivalent: "i")
         refreshIntervalMenuItem = intervalItem
         menu.addItem(intervalItem)
+        let launchItem = NSMenuItem(title: LaunchAtLoginController.menuTitle(), action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchAtLoginMenuItem = launchItem
+        menu.addItem(launchItem)
         menu.addItem(NSMenuItem(title: "设置 Krill Token...", action: #selector(setToken), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "清除 Token", action: #selector(clearToken), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -62,7 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = self
         }
 
+        menu.delegate = self
         item.menu = menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        updateLaunchAtLoginMenuItem()
     }
 
     private func updateStatusTooltip(_ snapshot: UsageSnapshot) {
@@ -101,6 +110,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let seconds = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 30
         usageStore.setRefreshIntervalSeconds(seconds)
         refreshIntervalMenuItem?.title = refreshIntervalTitle()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        if LaunchAtLoginController.requiresApproval {
+            showLaunchAtLoginApprovalAlert()
+            updateLaunchAtLoginMenuItem()
+            return
+        }
+
+        do {
+            try LaunchAtLoginController.setEnabled(LaunchAtLoginController.isEnabled == false)
+            updateLaunchAtLoginMenuItem()
+
+            if LaunchAtLoginController.requiresApproval {
+                showLaunchAtLoginApprovalAlert()
+            }
+        } catch {
+            updateLaunchAtLoginMenuItem()
+            showLaunchAtLoginErrorAlert(error)
+        }
     }
 
     @objc private func setToken() {
@@ -160,6 +189,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshIntervalTitle() -> String {
         "刷新间隔：\(usageStore.currentRefreshIntervalSeconds()) 秒..."
+    }
+
+    private func updateLaunchAtLoginMenuItem() {
+        launchAtLoginMenuItem?.title = LaunchAtLoginController.menuTitle()
+        launchAtLoginMenuItem?.state = LaunchAtLoginController.isEnabled ? .on : .off
+        launchAtLoginMenuItem?.isEnabled = LaunchAtLoginController.status != .notFound
+    }
+
+    private func showLaunchAtLoginApprovalAlert() {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.messageText = "需要在系统设置中批准"
+        alert.informativeText = "macOS 需要用户手动允许 Krill Floating Ball 作为登录项。请在系统设置的登录项中允许该应用。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "稍后处理")
+
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+        else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func showLaunchAtLoginErrorAlert(_ error: Error) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert(error: error)
+        alert.messageText = "开机启动设置失败"
+        alert.runModal()
     }
 
     private func makeStatusBarCaptureBallIcon() -> NSImage {

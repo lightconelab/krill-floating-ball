@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.0 - 2026-06-17
+
+- Added launch at login support using the native macOS login item service.
+- Added a menu bar toggle for enabling or disabling launch at login.
+- Added a Krill-themed app icon inspired by a capture ball with a central `K`.
+
 ## v0.1.0 - 2026-06-17
 
 Initial public release.

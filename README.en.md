@@ -8,9 +8,9 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 
 ## Screenshots
 
-| Menu Bar Icon | Menu Actions | Floating Ball |
-| --- | --- | --- |
-| <img src="docs/images/menubar-icon.png" width="180" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> | <img src="docs/images/floating-ball.png" width="140" alt="Floating ball"> |
+| App Icon | Menu Bar Icon | Menu Actions | Floating Ball |
+| --- | --- | --- | --- |
+| <img src="docs/images/app-icon.png" width="140" alt="App icon"> | <img src="docs/images/menubar-icon.png" width="180" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> | <img src="docs/images/floating-ball.png" width="140" alt="Floating ball"> |
 
 | Expanded Panel | Krill Account Comparison |
 | --- | --- |
@@ -27,9 +27,10 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 - Liquid quota indicator: the fill level follows weekly remaining quota, with stronger colors and pulse effects at low quota.
 - Hover panel showing today's spend, request count, cache rate, wallet balance, refresh time, and all active subscriptions.
 - Configurable auto-refresh interval from the menu bar. The default interval is 30 seconds.
-- Manual refresh, token setup, token clearing, and quit actions are available from the menu bar.
+- Manual refresh, token setup, token clearing, launch-at-login toggle, and quit actions are available from the menu bar.
 - Failed refreshes keep the previous successful data and do not overwrite the last successful refresh time.
 - Krill API token is stored in macOS Keychain, not in source files or local config files.
+- App icon uses a Krill-themed `K` mark.
 
 ## Requirements
 
@@ -40,7 +41,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 ## Install From Release
 
 1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.1.0-macOS-arm64.zip`.
+2. Unzip `Krill-Floating-Ball-v0.2.0-macOS-arm64.zip`.
 3. Open `Krill Floating Ball.app`.
 4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
 
@@ -69,7 +70,7 @@ The packaged app will be written to `dist/`.
 2. Enter your Krill API token when prompted, or choose `设置 Krill Token...` from the menu bar.
 3. Drag the floating ball to your preferred position.
 4. Hover over the ball to inspect today's usage, wallet balance, and active subscriptions.
-5. Use the menu bar to refresh manually, change the auto-refresh interval, clear the token, or quit the app.
+5. Use the menu bar to refresh manually, change the auto-refresh interval, enable or disable launch at login, clear the token, or quit the app.
 
 ## Data Scope
 
