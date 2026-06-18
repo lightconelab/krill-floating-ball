@@ -13,6 +13,7 @@ final class UsageWidgetView: NSView {
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
             needsDisplay = true
+            updateAnimationScheduling()
         }
     }
 
@@ -30,15 +31,19 @@ final class UsageWidgetView: NSView {
     private let ballSize: CGFloat = 80
     private let ballInset: CGFloat = 12
     private let panelMinWidth: CGFloat = 460
-    private let panelMaxWidth: CGFloat = 580
-    private let panelCardHeight: CGFloat = 66
-    private let panelCardGap: CGFloat = 7
-    private let panelBottomPadding: CGFloat = 16
-    private let panelListTopOffset: CGFloat = 128
+    private let panelMaxWidth: CGFloat = 460
+    private let panelWeeklyCardHeight: CGFloat = 166
+    private let panelTotalCardHeight: CGFloat = 122
+    private let panelCardGap: CGFloat = 16
+    private let panelBottomPadding: CGFloat = 20
+    private let panelListTopOffset: CGFloat = 176
+    private let panelContentInset: CGFloat = 20
     private let expandedRightPadding: CGFloat = 16
 
     private var animationPhase: CGFloat = 0
     private var panelProgress: CGFloat = 0
+    private var animationActive = false
+    private var currentAnimationInterval: TimeInterval?
     private var displayTimer: Timer?
     private var tracking: NSTrackingArea?
     private var pendingCollapse: DispatchWorkItem?
@@ -50,21 +55,18 @@ final class UsageWidgetView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         updateLayerScale()
-        if displayMode == .ball {
-            startDisplayTimer()
-        }
     }
 
     required init?(coder: NSCoder) {
         self.displayMode = .ball
         super.init(coder: coder)
         updateLayerScale()
-        startDisplayTimer()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateLayerScale()
+        updateAnimationScheduling()
     }
 
     override func viewDidChangeBackingProperties() {
@@ -140,22 +142,81 @@ final class UsageWidgetView: NSView {
         return NSSize(width: width, height: height)
     }
 
-    private func startDisplayTimer() {
-        displayTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else {
-                    return
-                }
-                guard self.window?.isVisible == true else {
-                    return
-                }
-                self.animationPhase += 0.13
-                self.needsDisplay = true
-            }
+    func setAnimationActive(_ active: Bool) {
+        guard displayMode == .ball else {
+            return
         }
+        animationActive = active
+        updateAnimationScheduling()
+    }
+
+    private func startDisplayTimer(interval: TimeInterval) {
+        guard displayMode == .ball else {
+            return
+        }
+        displayTimer?.invalidate()
+        let timer = Timer.scheduledTimer(
+            timeInterval: interval,
+            target: self,
+            selector: #selector(animationTimerFired),
+            userInfo: nil,
+            repeats: true
+        )
         RunLoop.main.add(timer, forMode: .common)
         displayTimer = timer
+        currentAnimationInterval = interval
+    }
+
+    private func stopDisplayTimer() {
+        displayTimer?.invalidate()
+        displayTimer = nil
+        currentAnimationInterval = nil
+    }
+
+    private func updateAnimationScheduling() {
+        guard displayMode == .ball else {
+            return
+        }
+        guard animationActive, window?.isVisible == true, let interval = animationFrameInterval() else {
+            stopDisplayTimer()
+            return
+        }
+
+        if displayTimer == nil || currentAnimationInterval != interval {
+            startDisplayTimer(interval: interval)
+        }
+    }
+
+    private func animationFrameInterval() -> TimeInterval? {
+        guard let percent = snapshot.weeklyPercent else {
+            return nil
+        }
+        if percent <= 10 {
+            return 1.0 / 12.0
+        }
+        if percent <= 30 {
+            return 1.0 / 10.0
+        }
+        return 1.0 / 10.0
+    }
+
+    @objc private func animationTimerFired(_ timer: Timer) {
+        guard animationActive,
+              window?.isVisible == true,
+              let interval = currentAnimationInterval,
+              let percent = snapshot.weeklyPercent
+        else {
+            updateAnimationScheduling()
+            return
+        }
+
+        if animationFrameInterval() != interval {
+            updateAnimationScheduling()
+        } else {
+            let phaseSpeed: CGFloat = percent <= 10 ? 1.6 : 1.05
+            animationPhase += phaseSpeed * CGFloat(interval)
+            needsDisplay = true
+        }
     }
 
     private func updateLayerScale() {
@@ -208,21 +269,16 @@ final class UsageWidgetView: NSView {
 
     private func drawBallShadow(in rect: NSRect, color: NSColor, pulse: CGFloat) {
         NSGraphicsContext.saveGraphicsState()
-        let shadow = NSShadow()
-        shadow.shadowBlurRadius = 16 + 8 * pulse
-        shadow.shadowColor = color.withAlphaComponent(0.38 + 0.25 * pulse)
-        shadow.shadowOffset = .zero
-        shadow.set()
-        color.withAlphaComponent(0.08).setFill()
+        color.withAlphaComponent(0.14 + 0.06 * pulse).setFill()
         NSBezierPath(ovalIn: rect.insetBy(dx: -2, dy: -2)).fill()
+        color.withAlphaComponent(0.16 + 0.08 * pulse).setStroke()
+        let glow = NSBezierPath(ovalIn: rect.insetBy(dx: -3, dy: -3))
+        glow.lineWidth = 2
+        glow.stroke()
         NSGraphicsContext.restoreGraphicsState()
     }
 
     private func drawLiquid(in rect: NSRect, percent: CGFloat, color: NSColor, pulse: CGFloat, critical: Bool) {
-        guard let context = NSGraphicsContext.current?.cgContext else {
-            return
-        }
-
         let waterTop = rect.maxY - rect.height * max(0.02, min(0.98, percent))
         let amplitude: CGFloat = critical ? 5.4 : 3.2
         let waveA = wavePath(in: rect, waterTop: waterTop, amplitude: amplitude, phase: animationPhase * 1.7)
@@ -234,22 +290,14 @@ final class UsageWidgetView: NSView {
         fillPath.close()
 
         NSGraphicsContext.saveGraphicsState()
-        fillPath.addClip()
-        let gradient = CGGradient(
-            colorsSpace: CGColorSpaceCreateDeviceRGB(),
-            colors: [
-                color.withAlphaComponent(0.92).cgColor,
-                color.blended(withFraction: 0.35, of: .white)?.withAlphaComponent(0.76).cgColor ?? color.cgColor,
-                color.withAlphaComponent(0.46).cgColor
-            ] as CFArray,
-            locations: [0, 0.58, 1]
-        )!
-        context.drawLinearGradient(
-            gradient,
-            start: CGPoint(x: rect.midX, y: waterTop),
-            end: CGPoint(x: rect.midX, y: rect.maxY),
-            options: []
-        )
+        color.withAlphaComponent(0.82).setFill()
+        fillPath.fill()
+        color.blended(withFraction: 0.58, of: .white)?.withAlphaComponent(0.16).setFill()
+        let sheen = waveA.copy() as! NSBezierPath
+        sheen.line(to: NSPoint(x: rect.maxX, y: min(rect.maxY, waterTop + rect.height * 0.18)))
+        sheen.line(to: NSPoint(x: rect.minX, y: min(rect.maxY, waterTop + rect.height * 0.18)))
+        sheen.close()
+        sheen.fill()
         NSGraphicsContext.restoreGraphicsState()
 
         color.withAlphaComponent(critical ? 0.9 * pulse : 0.75).setStroke()
@@ -262,7 +310,7 @@ final class UsageWidgetView: NSView {
 
     private func wavePath(in rect: NSRect, waterTop: CGFloat, amplitude: CGFloat, phase: CGFloat) -> NSBezierPath {
         let path = NSBezierPath()
-        let steps = 42
+        let steps = 34
         for index in 0...steps {
             let t = CGFloat(index) / CGFloat(steps)
             let x = rect.minX + t * rect.width
@@ -349,19 +397,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func liquidColor(for percent: Double?) -> NSColor {
-        guard let percent else {
-            return NSColor(hex: 0x667A8C)
-        }
-        if percent > 60 {
-            return NSColor(hex: 0x18D7FF)
-        }
-        if percent > 30 {
-            return NSColor(hex: 0x00FF88)
-        }
-        if percent > 10 {
-            return NSColor(hex: 0xFFAA00)
-        }
-        return NSColor(hex: 0xFF144F)
+        quotaColor(for: percent)
     }
 
     private func drawExpandedPanel(progress: CGFloat) {
@@ -385,81 +421,200 @@ final class UsageWidgetView: NSView {
 
     private func drawPanelShell(_ rect: NSRect, state: QuotaState, alpha: CGFloat) {
         let path = angledPanelPath(rect)
-        NSColor.white.withAlphaComponent(alpha).setFill()
+        NSColor(hex: 0xF4F5F7, alpha: alpha).setFill()
         path.fill()
 
-        NSColor(hex: 0xD9E6F2, alpha: alpha).setStroke()
-        path.lineWidth = 1.2
+        NSColor.white.withAlphaComponent(0.58 * alpha).setStroke()
+        path.lineWidth = 1
         path.stroke()
+    }
 
-        let inner = angledPanelPath(rect.insetBy(dx: 7, dy: 7))
-        NSColor.white.withAlphaComponent(alpha).setFill()
-        inner.fill()
-        NSColor(hex: 0xE6EEF6, alpha: alpha).setStroke()
-        inner.lineWidth = 0.8
-        inner.stroke()
+    private enum StatIcon {
+        case spending
+        case requests
+        case cache
+        case wallet
     }
 
     private func drawStatsSummary(in rect: NSRect, state: QuotaState, alpha: CGFloat) {
-        let header = NSRect(x: rect.minX + 28, y: rect.minY + 18, width: rect.width - 56, height: 78)
-        drawText(
-            "今日统计",
-            rect: NSRect(x: header.minX, y: header.minY, width: 86, height: 18),
-            font: .systemFont(ofSize: 14.6, weight: .bold),
-            color: NSColor(hex: 0x1B2633).withAlphaComponent(alpha),
-            kern: 1.2
+        let content = NSRect(
+            x: rect.minX + panelContentInset,
+            y: rect.minY + panelContentInset,
+            width: rect.width - panelContentInset * 2,
+            height: 118
         )
         drawText(
-            "(刷新时间：\(Formatters.time(snapshot.lastRefresh)))",
-            rect: NSRect(x: header.minX + 70, y: header.minY + 3, width: 180, height: 14),
-            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
-            color: NSColor(hex: 0x64748B).withAlphaComponent(alpha)
+            "今日统计",
+            rect: NSRect(x: content.minX + 2, y: content.minY, width: 88, height: 18),
+            font: sectionTitleFont(),
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
+        )
+        drawText(
+            "刷新时间：\(Formatters.time(snapshot.lastRefresh))",
+            rect: NSRect(x: content.maxX - 160, y: content.minY + 2, width: 160, height: 14),
+            font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+            color: NSColor(hex: 0x94A3B8).withAlphaComponent(alpha),
+            alignment: .right
         )
 
         let meta = [
-            ("花费", Formatters.usd(snapshot.todayCost), NSColor(hex: 0x087EA4)),
-            ("请求数", snapshot.requestCount.map(String.init) ?? "--", NSColor(hex: 0xC05BFF)),
-            ("缓存率", cacheSummaryText(), NSColor(hex: 0x089981)),
-            ("钱包余额", Formatters.usd(snapshot.walletBalance), NSColor(hex: 0x334155))
+            ("花费", Formatters.usd(snapshot.todayCost), StatIcon.spending, NSColor(hex: 0x1A56DB)),
+            ("请求数", snapshot.requestCount.map(String.init) ?? "--", StatIcon.requests, NSColor(hex: 0x7C3AED)),
+            ("缓存率", cacheSummaryText(), StatIcon.cache, NSColor(hex: 0x0D9F6E)),
+            ("钱包余额", Formatters.usd(snapshot.walletBalance), StatIcon.wallet, NSColor(hex: 0x64748B))
         ]
 
-        let itemWidth: CGFloat = header.width / CGFloat(meta.count)
+        let itemGap: CGFloat = 8
+        let cardY = content.minY + 29
+        let itemWidth: CGFloat = (content.width - itemGap * CGFloat(meta.count - 1)) / CGFloat(meta.count)
         for (index, item) in meta.enumerated() {
-            let x = header.minX + CGFloat(index) * itemWidth
-            drawText(
-                item.0,
-                rect: NSRect(x: x, y: header.minY + 27, width: itemWidth - 8, height: 13),
-                font: .systemFont(ofSize: 10.5, weight: .medium),
-                color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
-                kern: 0.4
-            )
-            drawText(
-                item.1,
-                rect: NSRect(x: x, y: header.minY + 43, width: itemWidth - 8, height: 22),
-                font: .monospacedDigitSystemFont(ofSize: index == 1 ? 15.5 : 14.1, weight: .semibold),
-                color: item.2.withAlphaComponent(alpha)
+            let x = content.minX + CGFloat(index) * (itemWidth + itemGap)
+            drawStatCard(
+                title: item.0,
+                value: item.1,
+                icon: item.2,
+                tint: item.3,
+                rect: NSRect(x: x, y: cardY, width: itemWidth, height: 70),
+                valueFont: .monospacedDigitSystemFont(ofSize: index == 1 ? 19 : 17.5, weight: .semibold),
+                alpha: alpha
             )
         }
 
         let line = NSBezierPath()
-        line.move(to: NSPoint(x: header.minX, y: header.maxY))
-        line.line(to: NSPoint(x: header.maxX, y: header.maxY))
-        line.lineWidth = 0.8
-        NSColor(hex: 0xE2E8F0, alpha: alpha).setStroke()
+        line.move(to: NSPoint(x: content.minX, y: content.maxY))
+        line.line(to: NSPoint(x: content.maxX, y: content.maxY))
+        line.lineWidth = 1
+        NSColor(hex: 0xDDE3EB, alpha: alpha).setStroke()
         line.stroke()
     }
 
+    private func drawStatCard(
+        title: String,
+        value: String,
+        icon: StatIcon,
+        tint: NSColor,
+        rect: NSRect,
+        valueFont: NSFont,
+        alpha: CGFloat
+    ) {
+        let card = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
+        NSColor.white.withAlphaComponent(alpha).setFill()
+        card.fill()
+        NSColor(hex: 0xE5EAF0, alpha: alpha).setStroke()
+        card.lineWidth = 0.8
+        card.stroke()
+
+        let titleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let titleWidth = measuredWidth(title, font: titleFont)
+        let headerWidth = min(rect.width - 12, 24 + 6 + titleWidth)
+        let iconRect = NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 10, width: 24, height: 24)
+        tint.blended(withFraction: 0.90, of: .white)?.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
+        drawStatIcon(icon, in: iconRect.insetBy(dx: 5, dy: 5), tint: tint, alpha: alpha)
+
+        drawText(
+            title,
+            rect: NSRect(x: iconRect.maxX + 6, y: rect.minY + 15, width: titleWidth, height: 14),
+            font: titleFont,
+            color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
+            alignment: .left
+        )
+        drawText(
+            value,
+            rect: NSRect(x: rect.minX + 6, y: rect.minY + 44, width: rect.width - 12, height: 22),
+            font: valueFont,
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+            alignment: .center
+        )
+    }
+
+    private func drawStatIcon(_ icon: StatIcon, in rect: NSRect, tint: NSColor, alpha: CGFloat) {
+        NSGraphicsContext.saveGraphicsState()
+        tint.withAlphaComponent(alpha).setStroke()
+        tint.withAlphaComponent(alpha).setFill()
+
+        switch icon {
+        case .spending:
+            let receipt = NSBezierPath(roundedRect: rect.insetBy(dx: 2.1, dy: 1.2), xRadius: 1.8, yRadius: 1.8)
+            receipt.lineWidth = 1.25
+            receipt.stroke()
+
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.minX + 4.5, y: rect.minY + 4.7))
+            path.line(to: NSPoint(x: rect.maxX - 4.5, y: rect.minY + 4.7))
+            path.move(to: NSPoint(x: rect.minX + 4.5, y: rect.midY))
+            path.line(to: NSPoint(x: rect.maxX - 5.6, y: rect.midY))
+            path.move(to: NSPoint(x: rect.minX + 4.5, y: rect.maxY - 4.7))
+            path.line(to: NSPoint(x: rect.maxX - 7.0, y: rect.maxY - 4.7))
+            path.lineWidth = 1.15
+            path.stroke()
+        case .requests:
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.minX + 3.0, y: rect.midY))
+            path.line(to: NSPoint(x: rect.maxX - 3.4, y: rect.midY))
+            path.move(to: NSPoint(x: rect.maxX - 6.3, y: rect.midY - 3.0))
+            path.line(to: NSPoint(x: rect.maxX - 3.2, y: rect.midY))
+            path.line(to: NSPoint(x: rect.maxX - 6.3, y: rect.midY + 3.0))
+            path.move(to: NSPoint(x: rect.minX + 3.2, y: rect.minY + 3.0))
+            path.line(to: NSPoint(x: rect.minX + 6.4, y: rect.minY + 3.0))
+            path.move(to: NSPoint(x: rect.minX + 3.2, y: rect.maxY - 3.0))
+            path.line(to: NSPoint(x: rect.minX + 6.4, y: rect.maxY - 3.0))
+            path.lineWidth = 1.35
+            path.stroke()
+        case .cache:
+            let top = NSBezierPath()
+            top.move(to: NSPoint(x: rect.midX, y: rect.minY + 1.2))
+            top.line(to: NSPoint(x: rect.maxX - 1.4, y: rect.minY + 4.4))
+            top.line(to: NSPoint(x: rect.midX, y: rect.minY + 7.6))
+            top.line(to: NSPoint(x: rect.minX + 1.4, y: rect.minY + 4.4))
+            top.close()
+            top.lineWidth = 1.2
+            top.stroke()
+
+            let mid = NSBezierPath()
+            mid.move(to: NSPoint(x: rect.minX + 1.4, y: rect.midY + 0.6))
+            mid.line(to: NSPoint(x: rect.midX, y: rect.midY + 3.8))
+            mid.line(to: NSPoint(x: rect.maxX - 1.4, y: rect.midY + 0.6))
+            mid.lineWidth = 1.2
+            mid.stroke()
+
+            let bottom = NSBezierPath()
+            bottom.move(to: NSPoint(x: rect.minX + 1.4, y: rect.maxY - 3.0))
+            bottom.line(to: NSPoint(x: rect.midX, y: rect.maxY - 0.3))
+            bottom.line(to: NSPoint(x: rect.maxX - 1.4, y: rect.maxY - 3.0))
+            bottom.lineWidth = 1.2
+            bottom.stroke()
+        case .wallet:
+            let wallet = NSBezierPath(roundedRect: rect.insetBy(dx: 1.2, dy: 2.8), xRadius: 2.1, yRadius: 2.1)
+            wallet.lineWidth = 1.35
+            wallet.stroke()
+            let seam = NSBezierPath()
+            seam.move(to: NSPoint(x: rect.minX + 1.6, y: rect.midY - 0.8))
+            seam.line(to: NSPoint(x: rect.maxX - 1.6, y: rect.midY - 0.8))
+            seam.lineWidth = 1.2
+            seam.stroke()
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 4.1, y: rect.midY + 1.0, width: 2.2, height: 2.2)).fill()
+        }
+
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
     private func drawSubscriptionCards(in rect: NSRect, alpha: CGFloat) {
-        let titleY = rect.minY + 106
+        let listTop = rect.minY + panelListTopOffset
+        let titleY = listTop - 26
         drawText(
             "生效套餐",
-            rect: NSRect(x: rect.minX + 28, y: titleY, width: 120, height: 16),
-            font: .systemFont(ofSize: 13.7, weight: .bold),
-            color: NSColor(hex: 0x1B2633).withAlphaComponent(alpha),
-            kern: 0.9
+            rect: NSRect(x: rect.minX + panelContentInset + 2, y: titleY, width: 120, height: 16),
+            font: sectionTitleFont(),
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
 
-        let listRect = NSRect(x: rect.minX + 24, y: titleY + 22, width: rect.width - 48, height: rect.maxY - titleY - 38)
+        let listRect = NSRect(
+            x: rect.minX + panelContentInset,
+            y: listTop,
+            width: rect.width - panelContentInset * 2,
+            height: rect.maxY - listTop - panelBottomPadding
+        )
         let items = snapshot.subscriptions
         guard items.isEmpty == false else {
             drawCentered(
@@ -471,138 +626,280 @@ final class UsageWidgetView: NSView {
             return
         }
 
-        let gap = panelCardGap
-        let cardHeight = max(58, min(panelCardHeight, (listRect.height - CGFloat(max(0, items.count - 1)) * gap) / CGFloat(items.count)))
-        for (index, item) in items.enumerated() {
-            let y = listRect.minY + CGFloat(index) * (cardHeight + gap)
+        var y = listRect.minY
+        for item in items {
+            let cardHeight = subscriptionCardHeight(item)
             drawSubscriptionCard(item, in: NSRect(x: listRect.minX, y: y, width: listRect.width, height: cardHeight), alpha: alpha)
+            y += cardHeight + panelCardGap
         }
     }
 
     private func drawSubscriptionCard(_ item: SubscriptionDisplayItem, in rect: NSRect, alpha: CGFloat) {
-        let percent = item.weeklyPercent ?? 0
-        let color = liquidColor(for: percent)
-        let compact = rect.height < 64
+        let hasWeeklyQuota = item.weeklyTotal != nil
 
-        let card = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        let card = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
         NSColor.white.withAlphaComponent(alpha).setFill()
         card.fill()
-        NSColor(hex: 0xE2E8F0, alpha: alpha).setStroke()
+        NSColor(hex: 0xE5EAF0, alpha: alpha).setStroke()
         card.lineWidth = 0.8
         card.stroke()
 
-        let titleFont = NSFont.systemFont(ofSize: compact ? 10.5 : 12.2, weight: .semibold)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: compact ? 8.7 : 9.6, weight: .medium)
-        let periodFont = NSFont.monospacedDigitSystemFont(ofSize: compact ? 8.9 : 9.8, weight: .medium)
-        let smallValueFont = NSFont.monospacedDigitSystemFont(ofSize: compact ? 7.9 : 8.5, weight: .medium)
-        let labelColor = NSColor(hex: 0x64748B).withAlphaComponent(alpha)
-
-        let topY = rect.minY + 7
-        let inset: CGFloat = 10
-        let remaining = remainingText(until: item.expiry, wrapped: false)
-        let remainingFont = NSFont.systemFont(ofSize: compact ? 9.3 : 10.4, weight: .semibold)
-        let remainingWidth = min(max(measuredWidth(remaining, font: remainingFont) + 5, compact ? 90 : 100), compact ? 122 : 136)
-        let nameWidth = min(max(measuredWidth(item.name, font: titleFont) + 5, compact ? 76 : 88), compact ? 120 : 144)
-        let remainingX = rect.maxX - inset - remainingWidth
-        let periodX = rect.minX + inset + nameWidth + 8
-        let periodWidth = max(40, remainingX - periodX - 8)
+        let body = rect.insetBy(dx: 16, dy: 14)
+        let topY = body.minY
         let periodText = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
+        let expiryStyle = expiryPillStyle(until: item.expiry, alpha: alpha)
 
         drawText(
             item.name,
-            rect: NSRect(x: rect.minX + inset, y: topY, width: nameWidth, height: 16),
-            font: titleFont,
-            color: NSColor(hex: 0x111827).withAlphaComponent(alpha)
+            rect: NSRect(x: body.minX, y: topY, width: body.width * 0.34, height: 18),
+            font: .systemFont(ofSize: 15, weight: .medium),
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
         drawText(
             periodText,
-            rect: NSRect(x: periodX, y: topY + 2, width: periodWidth, height: 14),
-            font: periodFont,
-            color: NSColor(hex: 0x475569).withAlphaComponent(alpha)
+            rect: NSRect(x: body.minX + body.width * 0.35, y: topY + 1, width: body.width * 0.65, height: 16),
+            font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+            color: NSColor(hex: 0xA3AFBD).withAlphaComponent(alpha),
+            alignment: .right
+        )
+
+        let totalPercent = quotaPercent(remaining: item.monthlyRemaining, total: item.monthlyTotal)
+        let firstQuotaY = topY + 31
+        if hasWeeklyQuota {
+            drawQuotaProgressRow(
+                label: "本周额度",
+                remaining: item.weeklyRemaining,
+                total: item.weeklyTotal,
+                detail: remainingText(until: item.weekEnd, wrapped: false),
+                rect: NSRect(x: body.minX, y: firstQuotaY, width: body.width, height: 25),
+                tint: quotaColor(for: item.weeklyPercent),
+                alpha: alpha,
+                showStableDetail: true
+            )
+
+            drawQuotaProgressRow(
+                label: "月额度",
+                remaining: item.monthlyRemaining,
+                total: item.monthlyTotal,
+                detail: nil,
+                rect: NSRect(x: body.minX, y: firstQuotaY + 44, width: body.width, height: 25),
+                tint: quotaColor(for: totalPercent),
+                alpha: alpha,
+                showStableDetail: false
+            )
+        } else {
+            drawQuotaProgressRow(
+                label: "总额度",
+                remaining: item.monthlyRemaining,
+                total: item.monthlyTotal,
+                detail: nil,
+                rect: NSRect(x: body.minX, y: firstQuotaY, width: body.width, height: 25),
+                tint: quotaColor(for: totalPercent),
+                alpha: alpha,
+                showStableDetail: false
+            )
+        }
+
+        let footerY = rect.maxY - 34
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: body.minX, y: footerY - 8))
+        line.line(to: NSPoint(x: body.maxX, y: footerY - 8))
+        line.lineWidth = 0.8
+        NSColor(hex: 0xE5EAF0, alpha: alpha).setStroke()
+        line.stroke()
+
+        let remaining = remainingText(until: item.expiry, wrapped: false)
+        let pillWidth = min(max(measuredWidth(remaining, font: expiryStyle.font) + 36, 114), 176)
+        let pillRect = NSRect(x: body.maxX - pillWidth, y: footerY, width: pillWidth, height: 22)
+        let remainingPill = NSBezierPath(roundedRect: pillRect, xRadius: 11, yRadius: 11)
+        expiryStyle.background.setFill()
+        remainingPill.fill()
+        expiryStyle.border.setStroke()
+        remainingPill.lineWidth = 0.7
+        remainingPill.stroke()
+        drawClockIcon(
+            in: NSRect(x: pillRect.minX + 9, y: pillRect.minY + 5.5, width: 11, height: 11),
+            color: expiryStyle.foreground
         )
         drawText(
             remaining,
-            rect: NSRect(x: remainingX, y: topY, width: remainingWidth, height: 16),
-            font: remainingFont,
-            color: color.withAlphaComponent(alpha)
+            rect: NSRect(x: pillRect.minX + 24, y: pillRect.minY + 4, width: pillRect.width - 32, height: 14),
+            font: expiryStyle.font,
+            color: expiryStyle.foreground,
+            alignment: .center
         )
-
-        let quotaRowY = rect.minY + (compact ? 32 : 35)
-        let innerWidth = rect.width - inset * 2
-        let gap: CGFloat = 14
-        let monthlyWidth = min(224, max(190, innerWidth * 0.40))
-        let weeklyWidth = innerWidth - monthlyWidth - gap
-        drawQuotaLine(
-            label: "本周额度",
-            value: "剩余 \(Formatters.usd(item.weeklyRemaining)) / \(Formatters.usd(item.weeklyTotal))",
-            detail: remainingText(until: item.weekEnd),
-            rect: NSRect(x: rect.minX + inset, y: quotaRowY, width: weeklyWidth, height: 13),
-            labelFont: valueFont,
-            valueFont: valueFont,
-            detailFont: smallValueFont,
-            labelColor: labelColor,
-            valueColor: color.withAlphaComponent(alpha),
-            detailColor: NSColor(hex: 0x64748B).withAlphaComponent(alpha)
-        )
-
-        drawInfoLine(
-            label: "月额度",
-            value: "剩余 \(Formatters.usd(item.monthlyRemaining)) / \(Formatters.usd(item.monthlyTotal))",
-            x: rect.minX + inset + weeklyWidth + gap,
-            y: quotaRowY,
-            width: monthlyWidth,
-            font: valueFont,
-            labelColor: labelColor,
-            valueColor: NSColor(hex: 0xC05BFF).withAlphaComponent(alpha)
-        )
-
-        let barRect = NSRect(x: rect.minX + 10, y: rect.maxY - 5, width: rect.width - 20, height: 2)
-        NSColor(hex: 0xE2E8F0, alpha: alpha).setFill()
-        NSBezierPath(roundedRect: barRect, xRadius: 1, yRadius: 1).fill()
-        let fill = NSRect(x: barRect.minX, y: barRect.minY, width: barRect.width * CGFloat(percent / 100), height: barRect.height)
-        color.withAlphaComponent(0.78 * alpha).setFill()
-        NSBezierPath(roundedRect: fill, xRadius: 1, yRadius: 1).fill()
     }
 
-    private func drawInfoLine(
-        label: String,
-        value: String,
-        x: CGFloat,
-        y: CGFloat,
-        width: CGFloat,
-        font: NSFont,
-        labelColor: NSColor,
-        valueColor: NSColor
-    ) {
-        let labelWidth = min(width, measuredWidth(label, font: font) + 8)
-        drawText(label, rect: NSRect(x: x, y: y, width: labelWidth, height: 13), font: font, color: labelColor)
-        drawText(value, rect: NSRect(x: x + labelWidth, y: y, width: width - labelWidth, height: 13), font: font, color: valueColor)
+    private struct ExpiryPillStyle {
+        let foreground: NSColor
+        let background: NSColor
+        let border: NSColor
+        let font: NSFont
     }
 
-    private func drawQuotaLine(
+    private func expiryPillStyle(until date: Date?, alpha: CGFloat) -> ExpiryPillStyle {
+        guard let date else {
+            let neutral = NSColor(hex: 0x64748B)
+            return ExpiryPillStyle(
+                foreground: neutral.withAlphaComponent(alpha),
+                background: NSColor(hex: 0xF1F5F9, alpha: 0.82 * alpha),
+                border: NSColor(hex: 0xCBD5E1, alpha: 0.35 * alpha),
+                font: .systemFont(ofSize: 10.8, weight: .semibold)
+            )
+        }
+
+        let seconds = max(0, date.timeIntervalSince(Date()))
+        if seconds <= 6 * 3_600 {
+            return ExpiryPillStyle(
+                foreground: NSColor(hex: 0xDC2626).withAlphaComponent(alpha),
+                background: NSColor(hex: 0xFEE2E2, alpha: 0.92 * alpha),
+                border: NSColor(hex: 0xFCA5A5, alpha: 0.55 * alpha),
+                font: .systemFont(ofSize: 12.0, weight: .bold)
+            )
+        }
+
+        if seconds <= 24 * 3_600 {
+            return ExpiryPillStyle(
+                foreground: NSColor(hex: 0xEA580C).withAlphaComponent(alpha),
+                background: NSColor(hex: 0xFFEDD5, alpha: 0.90 * alpha),
+                border: NSColor(hex: 0xFDBA74, alpha: 0.48 * alpha),
+                font: .systemFont(ofSize: 11.7, weight: .bold)
+            )
+        }
+
+        if seconds <= 3 * 86_400 {
+            return ExpiryPillStyle(
+                foreground: NSColor(hex: 0xB45309).withAlphaComponent(alpha),
+                background: NSColor(hex: 0xFEF3C7, alpha: 0.88 * alpha),
+                border: NSColor(hex: 0xFDE68A, alpha: 0.46 * alpha),
+                font: .systemFont(ofSize: 11.4, weight: .semibold)
+            )
+        }
+
+        let calm = NSColor(hex: 0x1A56DB)
+        return ExpiryPillStyle(
+            foreground: calm.withAlphaComponent(alpha),
+            background: calm.blended(withFraction: 0.91, of: .white)?.withAlphaComponent(0.74 * alpha) ?? NSColor.white.withAlphaComponent(alpha),
+            border: calm.withAlphaComponent(0.16 * alpha),
+            font: .systemFont(ofSize: 11.2, weight: .semibold)
+        )
+    }
+
+    private func drawQuotaProgressRow(
         label: String,
-        value: String,
-        detail: String,
+        remaining: Double?,
+        total: Double?,
+        detail: String?,
         rect: NSRect,
-        labelFont: NSFont,
-        valueFont: NSFont,
-        detailFont: NSFont,
-        labelColor: NSColor,
-        valueColor: NSColor,
-        detailColor: NSColor
+        tint: NSColor,
+        alpha: CGFloat,
+        showStableDetail: Bool
     ) {
-        let labelWidth = min(rect.width, measuredWidth(label, font: labelFont) + 7)
-        let valueX = rect.minX + labelWidth
-        let valueWidth = min(measuredWidth(value, font: valueFont) + 4, max(0, rect.maxX - valueX))
-        let detailX = valueX + valueWidth + 3
-        drawText(label, rect: NSRect(x: rect.minX, y: rect.minY, width: labelWidth, height: rect.height), font: labelFont, color: labelColor)
-        drawText(value, rect: NSRect(x: valueX, y: rect.minY, width: valueWidth, height: rect.height), font: valueFont, color: valueColor)
+        let labelFont = NSFont.systemFont(ofSize: 10.8, weight: .medium)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 10.8, weight: .medium)
+        let detailFont = NSFont.monospacedDigitSystemFont(ofSize: 9.2, weight: .medium)
+        let labelWidth = min(rect.width * 0.28, measuredWidth(label, font: labelFont) + 8)
+        let value = "剩余 \(Formatters.usd(remaining)) / \(Formatters.usd(total))"
+
         drawText(
-            detail,
-            rect: NSRect(x: detailX, y: rect.minY + 1, width: max(0, rect.maxX - detailX), height: rect.height),
-            font: detailFont,
-            color: detailColor
+            label,
+            rect: NSRect(x: rect.minX, y: rect.minY, width: labelWidth, height: 14),
+            font: labelFont,
+            color: NSColor(hex: 0x475569).withAlphaComponent(alpha)
         )
+
+        if let detail, detail.isEmpty == false {
+            let detailWidth = min(140, measuredWidth(detail, font: detailFont) + 34)
+            let detailRect = NSRect(x: rect.minX + labelWidth, y: rect.minY - 1, width: detailWidth, height: 16)
+            let detailTint = NSColor(hex: 0x1A56DB)
+            let pill = NSBezierPath(roundedRect: detailRect, xRadius: 8, yRadius: 8)
+            detailTint.blended(withFraction: 0.90, of: .white)?
+                .withAlphaComponent(0.78 * alpha)
+                .setFill()
+            pill.fill()
+            detailTint.withAlphaComponent((showStableDetail ? 0.16 : 0.10) * alpha).setStroke()
+            pill.lineWidth = 0.6
+            pill.stroke()
+            drawClockIcon(
+                in: NSRect(x: detailRect.minX + 8, y: detailRect.minY + 3, width: 10, height: 10),
+                color: detailTint.withAlphaComponent(alpha)
+            )
+            drawText(
+                detail,
+                rect: NSRect(x: detailRect.minX + 23, y: detailRect.minY + 2, width: detailRect.width - 29, height: 12),
+                font: detailFont,
+                color: detailTint.withAlphaComponent(alpha)
+            )
+        }
+
+        drawText(
+            value,
+            rect: NSRect(x: rect.minX + labelWidth, y: rect.minY, width: rect.width - labelWidth, height: 14),
+            font: valueFont,
+            color: NSColor(hex: 0x0F172A).withAlphaComponent(alpha),
+            alignment: .right
+        )
+
+        let track = pixelAligned(NSRect(x: rect.minX, y: rect.minY + 18, width: rect.width, height: 5))
+        let trackPath = NSBezierPath(roundedRect: track, xRadius: 2.5, yRadius: 2.5)
+        NSColor(hex: 0xE8EEF5, alpha: alpha).setFill()
+        trackPath.fill()
+
+        let percent = CGFloat(max(0, min(100, quotaPercent(remaining: remaining, total: total) ?? 0)) / 100)
+        guard percent > 0 else {
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        trackPath.addClip()
+        let fillWidth = min(track.width, max(0, track.width * percent))
+        let fill = NSRect(x: track.minX, y: track.minY, width: fillWidth, height: track.height)
+        tint.withAlphaComponent(0.94 * alpha).setFill()
+        NSBezierPath(rect: fill).fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawClockIcon(in rect: NSRect, color: NSColor) {
+        NSGraphicsContext.saveGraphicsState()
+        color.setStroke()
+        let circle = NSBezierPath(ovalIn: rect)
+        circle.lineWidth = 1.2
+        circle.stroke()
+
+        let hands = NSBezierPath()
+        hands.move(to: NSPoint(x: rect.midX, y: rect.minY + rect.height * 0.28))
+        hands.line(to: NSPoint(x: rect.midX, y: rect.midY))
+        hands.line(to: NSPoint(x: rect.midX + rect.width * 0.24, y: rect.midY + rect.height * 0.15))
+        hands.lineWidth = 1.2
+        hands.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func quotaPercent(remaining: Double?, total: Double?) -> Double? {
+        guard let remaining, let total, total > 0, remaining.isFinite, total.isFinite else {
+            return nil
+        }
+        return max(0, min(100, remaining / total * 100))
+    }
+
+    private func quotaColor(for percent: Double?) -> NSColor {
+        guard let percent else {
+            return NSColor(hex: 0x94A3B8)
+        }
+        if percent > 60 {
+            return NSColor(hex: 0x1A56DB)
+        }
+        if percent > 30 {
+            return NSColor(hex: 0x0D9F6E)
+        }
+        if percent > 10 {
+            return NSColor(hex: 0xD97706)
+        }
+        return NSColor(hex: 0xE02D3C)
+    }
+
+    private func sectionTitleFont() -> NSFont {
+        .systemFont(ofSize: 14, weight: .medium)
     }
 
     private func cacheSummaryText() -> String {
@@ -663,10 +960,14 @@ final class UsageWidgetView: NSView {
         if snapshot.subscriptions.isEmpty {
             cardStackHeight = 68
         } else {
-            let count = CGFloat(snapshot.subscriptions.count)
-            cardStackHeight = count * panelCardHeight + max(0, count - 1) * panelCardGap
+            cardStackHeight = snapshot.subscriptions.map(subscriptionCardHeight).reduce(0, +)
+                + CGFloat(max(0, snapshot.subscriptions.count - 1)) * panelCardGap
         }
         return max(212, panelListTopOffset + cardStackHeight + panelBottomPadding)
+    }
+
+    private func subscriptionCardHeight(_ item: SubscriptionDisplayItem) -> CGFloat {
+        item.weeklyTotal == nil ? panelTotalCardHeight : panelWeeklyCardHeight
     }
 
     private func currentPanelHeight() -> CGFloat {
@@ -674,40 +975,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func preferredPanelWidth() -> CGFloat {
-        var required = panelMinWidth
-        let titleFont = NSFont.systemFont(ofSize: 12.2, weight: .semibold)
-        let periodFont = NSFont.monospacedDigitSystemFont(ofSize: 9.8, weight: .medium)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 9.6, weight: .medium)
-        let remainingFont = NSFont.systemFont(ofSize: 10.4, weight: .semibold)
-        let cardHorizontalPadding: CGFloat = 20
-        let listHorizontalPadding: CGFloat = 48
-
-        for item in snapshot.subscriptions {
-            let nameWidth = min(max(measuredWidth(item.name, font: titleFont) + 5, 88), 144)
-            let period = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
-            let topWidth = cardHorizontalPadding
-                + nameWidth
-                + 8
-                + measuredWidth(period, font: periodFont)
-                + 8
-                + measuredWidth(remainingText(until: item.expiry, wrapped: false), font: remainingFont)
-
-            let weeklyValue = "剩余 \(Formatters.usd(item.weeklyRemaining)) / \(Formatters.usd(item.weeklyTotal))"
-            let weeklyWidth = measuredWidth("本周额度", font: valueFont)
-                + 7
-                + measuredWidth(weeklyValue, font: valueFont)
-                + 7
-                + measuredWidth(remainingText(until: item.weekEnd), font: valueFont)
-            let monthlyValue = "剩余 \(Formatters.usd(item.monthlyRemaining)) / \(Formatters.usd(item.monthlyTotal))"
-            let monthlyWidth = measuredWidth("月额度", font: valueFont)
-                + 8
-                + measuredWidth(monthlyValue, font: valueFont)
-            let quotaWidth = cardHorizontalPadding + weeklyWidth + 14 + monthlyWidth
-
-            required = max(required, topWidth + listHorizontalPadding, quotaWidth + listHorizontalPadding)
-        }
-
-        return min(panelMaxWidth, ceil(required))
+        panelMaxWidth
     }
 
     private func currentPanelWidth() -> CGFloat {
@@ -737,6 +1005,20 @@ final class UsageWidgetView: NSView {
 
     private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
         (text as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    private func pixelAligned(_ rect: NSRect) -> NSRect {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        return NSRect(
+            x: pixelAligned(rect.origin.x, scale: scale),
+            y: pixelAligned(rect.origin.y, scale: scale),
+            width: pixelAligned(rect.width, scale: scale),
+            height: pixelAligned(rect.height, scale: scale)
+        )
+    }
+
+    private func pixelAligned(_ value: CGFloat, scale: CGFloat) -> CGFloat {
+        (value * scale).rounded() / scale
     }
 
     private func drawCentered(
@@ -772,12 +1054,16 @@ final class UsageWidgetView: NSView {
         rect: NSRect,
         font: NSFont,
         color: NSColor,
-        kern: CGFloat = 0
+        kern: CGFloat = 0,
+        alignment: NSTextAlignment = .left
     ) {
+        let style = NSMutableParagraphStyle()
+        style.alignment = alignment
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,
-            .kern: kern
+            .kern: kern,
+            .paragraphStyle: style
         ]
         (text as NSString).draw(in: rect, withAttributes: attributes)
     }

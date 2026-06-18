@@ -39,11 +39,13 @@ final class FloatingBallController {
             window.setFrame(pixelAligned(window.frame, on: window.screen), display: true)
         }
         window.orderFrontRegardless()
+        ballView.setAnimationActive(true)
         installMoveObserverIfNeeded()
     }
 
     func hide() {
         hidePanel(animated: false)
+        ballView.setAnimationActive(false)
         window.orderOut(nil)
     }
 
@@ -143,8 +145,7 @@ final class FloatingBallController {
             return
         }
         guard animated else {
-            panelWindow.orderOut(nil)
-            panelWindow.alphaValue = 1
+            releasePanelWindow()
             return
         }
 
@@ -159,10 +160,16 @@ final class FloatingBallController {
                 guard let self, self.isExpanded == false else {
                     return
                 }
-                self.panelWindow?.orderOut(nil)
-                self.panelWindow?.alphaValue = 1
+                self.releasePanelWindow()
             }
         }
+    }
+
+    private func releasePanelWindow() {
+        panelWindow?.orderOut(nil)
+        panelWindow?.alphaValue = 1
+        panelWindow?.contentView = nil
+        panelWindow = nil
     }
 
     private func positionPanel(animated: Bool) {

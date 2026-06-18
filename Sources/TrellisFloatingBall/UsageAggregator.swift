@@ -22,23 +22,23 @@ enum UsageAggregator {
             let expiry = APIDateParser.parse(item.subscriptionEndAt)
             let weekStart = APIDateParser.parse(item.quota?.windowStartAt)
             let weekEnd = APIDateParser.parse(item.quota?.windowResetAt)
-            let weeklyTotal = effectiveWeeklyLimit(item.quota)
-            let weeklyUsed = decimal(item.quota?.usedUsd) + decimal(item.quota?.forwardedUsedUsd)
-            let apiRemaining = decimal(item.quota?.remainingUsd) + decimal(item.quota?.forwardedRemainingUsd)
-            let weeklyRemaining = apiRemaining > 0 ? apiRemaining : max(0, weeklyTotal - weeklyUsed)
-            let isMonthly = isMonthlySubscription(item)
-            let monthlyTotal = isMonthly ? monthlyLimit(item.quota) : nil
-            let monthlyUsed = isMonthly ? decimal(item.totalUsedUsd) : nil
-            let monthlyRemaining = isMonthly ? max(0, (monthlyTotal ?? 0) - (monthlyUsed ?? 0)) : nil
+            let weeklyTotal = weeklyLimit(item)
+            let weeklyUsed = weeklyTotal.map { _ in weeklyUsedAmount(item) }
+            let weeklyRemaining = weeklyTotal.map { total in
+                weeklyRemainingAmountFromAPI(item) ?? max(0, total - (weeklyUsed ?? 0))
+            }
+            let monthlyTotal = totalLimit(item)
+            let monthlyUsed = monthlyTotal.map { _ in decimal(item.totalUsedUsd) }
+            let monthlyRemaining = monthlyTotal.map { total in max(0, total - (monthlyUsed ?? 0)) }
 
             return SubscriptionDisplayItem(
                 name: item.plan?.name ?? "未命名套餐",
                 start: start,
                 expiry: expiry,
                 endpoints: item.plan?.entryRouteKeys ?? [],
-                weeklyRemaining: weeklyTotal > 0 ? weeklyRemaining : nil,
-                weeklyUsed: weeklyTotal > 0 ? weeklyUsed : nil,
-                weeklyTotal: weeklyTotal > 0 ? weeklyTotal : nil,
+                weeklyRemaining: weeklyRemaining,
+                weeklyUsed: weeklyUsed,
+                weeklyTotal: weeklyTotal,
                 weekStart: weekStart,
                 weekEnd: weekEnd,
                 monthlyRemaining: monthlyRemaining,
@@ -48,28 +48,26 @@ enum UsageAggregator {
             (left.expiry ?? .distantPast) > (right.expiry ?? .distantPast)
         }
 
-        let weeklyTotal = activeSubscriptions.reduce(0) { partial, item in
-            partial + effectiveWeeklyLimit(item.quota)
+        let weeklySubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
+        let weeklyTotal = weeklySubscriptions.reduce(0) { partial, item in
+            partial + (weeklyLimit(item) ?? 0)
         }
-        let weeklyUsed = activeSubscriptions.reduce(0) { partial, item in
-            partial + decimal(item.quota?.usedUsd) + decimal(item.quota?.forwardedUsedUsd)
+        let weeklyUsed = weeklySubscriptions.reduce(0) { partial, item in
+            partial + (weeklyLimit(item).map { _ in weeklyUsedAmount(item) } ?? 0)
         }
-        let weeklyRemainingFromAPI = activeSubscriptions.reduce(0) { partial, item in
-            partial + decimal(item.quota?.remainingUsd) + decimal(item.quota?.forwardedRemainingUsd)
-        }
-        let weeklyRemaining = weeklyRemainingFromAPI > 0
-            ? weeklyRemainingFromAPI
-            : max(0, weeklyTotal - weeklyUsed)
+        let weeklyRemainingValues = weeklySubscriptions.map { weeklyRemainingAmountFromAPI($0) }
+        let hasWeeklyRemainingFromAPI = weeklyRemainingValues.contains { $0 != nil }
+        let weeklyRemainingFromAPI = weeklyRemainingValues.compactMap { $0 }.reduce(0, +)
+        let weeklyRemaining = hasWeeklyRemainingFromAPI ? weeklyRemainingFromAPI : max(0, weeklyTotal - weeklyUsed)
 
-        let weekStarts = activeSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
-        let weekEnds = activeSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let weekStarts = weeklySubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
+        let weekEnds = weeklySubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let subscriptionsWithTotalLimit = activeSubscriptions.filter { totalLimit($0) != nil }
 
-        let monthlySubscriptions = activeSubscriptions.filter(isMonthlySubscription)
-
-        let monthlyTotal = monthlySubscriptions.reduce(0) { partial, item in
-            partial + monthlyLimit(item.quota)
+        let monthlyTotal = subscriptionsWithTotalLimit.reduce(0) { partial, item in
+            partial + (totalLimit(item) ?? 0)
         }
-        let monthlyUsed = monthlySubscriptions.reduce(0) { partial, item in
+        let monthlyUsed = subscriptionsWithTotalLimit.reduce(0) { partial, item in
             partial + decimal(item.totalUsedUsd)
         }
         let monthlyRemaining = monthlyTotal > 0 ? max(0, monthlyTotal - monthlyUsed) : nil
@@ -120,18 +118,80 @@ enum UsageAggregator {
         )
     }
 
-    private static func effectiveWeeklyLimit(_ quota: Quota?) -> Double {
-        decimal(quota?.dailyLimitUsd) + decimal(quota?.forwardedLimitUsd)
+    private static func weeklyLimit(_ item: SubscriptionItem) -> Double? {
+        let billing = billingType(item)
+        let dailyLimit = decimal(item.quota?.dailyLimitUsd)
+
+        if billing == "usd_monthly" {
+            return nil
+        }
+
+        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
+            return dailyLimit > 0 ? dailyLimit : nil
+        }
+
+        let legacyLimit = dailyLimit + decimal(item.quota?.forwardedLimitUsd)
+        return legacyLimit > 0 ? legacyLimit : nil
     }
 
-    private static func monthlyLimit(_ quota: Quota?) -> Double {
-        decimal(quota?.dailyLimitUsd) * 4
+    private static func totalLimit(_ item: SubscriptionItem) -> Double? {
+        let billing = billingType(item)
+        let dailyLimit = decimal(item.quota?.dailyLimitUsd)
+
+        if billing == "usd_monthly" {
+            return dailyLimit > 0 ? dailyLimit : nil
+        }
+
+        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
+            let total = dailyLimit * 4
+            return total > 0 ? total : nil
+        }
+
+        if isMonthlySubscription(item) {
+            let total = dailyLimit * 4
+            return total > 0 ? total : nil
+        }
+
+        return nil
+    }
+
+    private static func weeklyUsedAmount(_ item: SubscriptionItem) -> Double {
+        let billing = billingType(item)
+        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
+            return decimal(item.quota?.usedUsd)
+        }
+        return decimal(item.quota?.usedUsd) + decimal(item.quota?.forwardedUsedUsd)
+    }
+
+    private static func weeklyRemainingAmountFromAPI(_ item: SubscriptionItem) -> Double? {
+        guard hasDecimalValue(item.quota?.remainingUsd) else {
+            return nil
+        }
+
+        let billing = billingType(item)
+        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
+            return decimal(item.quota?.remainingUsd)
+        }
+        return decimal(item.quota?.remainingUsd) + decimal(item.quota?.forwardedRemainingUsd)
     }
 
     private static func isMonthlySubscription(_ item: SubscriptionItem) -> Bool {
         let duration = item.plan?.durationDays ?? 0
-        let billing = item.plan?.billingType?.lowercased() ?? ""
+        let billing = billingType(item)
         return duration >= 30 || billing.contains("month")
+    }
+
+    private static func billingType(_ item: SubscriptionItem) -> String {
+        (item.plan?.billingType ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private static func hasDecimalValue(_ value: String?) -> Bool {
+        guard let value else {
+            return false
+        }
+        return Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
     static func decimal(_ value: String?) -> Double {

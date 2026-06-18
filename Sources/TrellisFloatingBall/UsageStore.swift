@@ -7,6 +7,7 @@ final class UsageStore {
     private enum Defaults {
         static let refreshIntervalSeconds = "refreshIntervalSeconds"
         static let defaultRefreshIntervalSeconds = 30
+        static let minimumRefreshIntervalSeconds = 5
     }
 
     private let keychain: KeychainStore
@@ -19,7 +20,9 @@ final class UsageStore {
     init(keychain: KeychainStore) {
         self.keychain = keychain
         let saved = UserDefaults.standard.integer(forKey: Defaults.refreshIntervalSeconds)
-        self.refreshIntervalSeconds = saved > 0 ? saved : Defaults.defaultRefreshIntervalSeconds
+        self.refreshIntervalSeconds = saved > 0
+            ? max(Defaults.minimumRefreshIntervalSeconds, saved)
+            : Defaults.defaultRefreshIntervalSeconds
     }
 
     func start() {
@@ -38,7 +41,7 @@ final class UsageStore {
     }
 
     func setRefreshIntervalSeconds(_ seconds: Int) {
-        refreshIntervalSeconds = max(1, seconds)
+        refreshIntervalSeconds = max(Defaults.minimumRefreshIntervalSeconds, seconds)
         UserDefaults.standard.set(refreshIntervalSeconds, forKey: Defaults.refreshIntervalSeconds)
         scheduleTimer()
     }
@@ -58,7 +61,6 @@ final class UsageStore {
         snapshot.isLoading = true
         snapshot.needsToken = false
         snapshot.lastError = nil
-        emit()
 
         Task { [weak self] in
             await self?.load(token: token)

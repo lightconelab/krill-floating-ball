@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.1 - 2026-06-18
+
+- Added refreshed README screenshots for the menu bar icon, menu actions, floating ball, expanded panel, floating overview, and Krill account comparison.
+- Added CPU, memory, and energy screenshots for public overhead reference.
+- Updated the menu bar icon to match the app icon style with a central `K` template mark.
+- Refined the floating ball liquid animation and quota color thresholds while keeping low idle overhead.
+- Improved expanded panel layout, typography, stat cards, active subscription cards, and progress bar rendering.
+- Added a minimum auto-refresh interval guard to avoid accidental high-frequency refreshes.
+- Released the hover panel window after collapse to reduce long-running memory usage.
+- Corrected quota calculation for `usd_monthly` and `usd_weekly` billing types.
+- Increased active subscription card typography for better readability.
+
 ## v0.2.0 - 2026-06-17
 
 - Added launch at login support using the native macOS login item service.

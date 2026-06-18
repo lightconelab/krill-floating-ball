@@ -229,6 +229,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let bounds = rect.insetBy(dx: 2, dy: 2)
             let center = NSPoint(x: bounds.midX, y: bounds.midY)
 
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(ovalIn: bounds).addClip()
+            strokeColor.withAlphaComponent(0.22).setFill()
+            NSBezierPath(rect: NSRect(x: bounds.minX, y: center.y, width: bounds.width, height: bounds.height / 2)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+
             strokeColor.setStroke()
 
             let outer = NSBezierPath(ovalIn: bounds)
@@ -245,9 +251,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             buttonOuter.lineWidth = 1.7
             buttonOuter.stroke()
 
-            let buttonInner = NSBezierPath(ovalIn: NSRect(x: center.x - 1.2, y: center.y - 1.2, width: 2.4, height: 2.4))
-            buttonInner.lineWidth = 1.2
-            buttonInner.stroke()
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 5.9, weight: .black),
+                .foregroundColor: strokeColor,
+                .paragraphStyle: paragraph,
+            ]
+            let text = NSString(string: "K")
+            let textSize = text.size(withAttributes: attributes)
+            text.draw(
+                in: NSRect(
+                    x: center.x - textSize.width / 2,
+                    y: center.y - textSize.height / 2 - 0.2,
+                    width: textSize.width,
+                    height: textSize.height
+                ),
+                withAttributes: attributes
+            )
 
             return true
         }
