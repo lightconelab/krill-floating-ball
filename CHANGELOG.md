@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.2 - 2026-06-18
+
+- Corrected the floating ball weekly availability pool to include active total-quota subscriptions whose active time range overlaps the current weekly quota window.
+- Kept the liquid color alert level tied to the weekly availability remaining percentage.
+- Fixed the missing-token state so the floating ball no longer renders a gray liquid wave before a token is configured.
+- Sorted active subscription cards by remaining total quota from high to low, with expiry time as the tie-breaker.
+- Refreshed README screenshots for the floating overview, expanded panel, floating ball, missing-token state, and token prompt.
+- Updated Chinese and English documentation to describe the current quota scope.
+
 ## v0.2.1 - 2026-06-18
 
 - Added refreshed README screenshots for the menu bar icon, menu actions, floating ball, expanded panel, floating overview, and Krill account comparison.

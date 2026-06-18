@@ -246,11 +246,25 @@ final class UsageWidgetView: NSView {
 
     private func drawLiquidBall() {
         let rect = ballRect()
-        let percentValue = snapshot.weeklyPercent
-        let percent = CGFloat(max(0, min(100, percentValue ?? 0)) / 100)
+        guard let percentValue = snapshot.weeklyPercent else {
+            let idleColor = NSColor(hex: 0x9EDFFF)
+            drawBallShadow(in: rect, color: idleColor, pulse: 0.35)
+
+            let sphere = NSBezierPath(ovalIn: rect)
+            NSGraphicsContext.saveGraphicsState()
+            sphere.addClip()
+            drawGlassHighlights(in: rect)
+            NSGraphicsContext.restoreGraphicsState()
+
+            drawBallBorder(in: rect, color: idleColor, pulse: 0.35, critical: false)
+            drawWeeklyAmount(in: rect, color: NSColor(hex: 0xF3FAFF))
+            return
+        }
+
+        let percent = CGFloat(max(0, min(100, percentValue)) / 100)
         let liquidColor = liquidColor(for: percentValue)
-        let critical = (percentValue ?? 0) <= 10
-        let warning = (percentValue ?? 0) <= 30
+        let critical = percentValue <= 10
+        let warning = percentValue <= 30
         let pulse = 0.55 + 0.45 * max(0, sin(animationPhase * (critical ? 5.4 : 2.8)))
 
         drawBallShadow(in: rect, color: warning ? liquidColor : NSColor(hex: 0x5FC8FF), pulse: pulse)

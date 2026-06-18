@@ -45,23 +45,50 @@ enum UsageAggregator {
                 monthlyTotal: monthlyTotal
             )
         }.sorted { left, right in
-            (left.expiry ?? .distantPast) > (right.expiry ?? .distantPast)
+            let leftRemaining = left.monthlyRemaining ?? -.infinity
+            let rightRemaining = right.monthlyRemaining ?? -.infinity
+
+            if leftRemaining != rightRemaining {
+                return leftRemaining > rightRemaining
+            }
+
+            return (left.expiry ?? .distantPast) > (right.expiry ?? .distantPast)
         }
 
-        let weeklySubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
-        let weeklyTotal = weeklySubscriptions.reduce(0) { partial, item in
+        let weeklyQuotaSubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
+        let weekStarts = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
+        let weekEnds = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let weekWindowStart = weekStarts.min()
+        let weekWindowEnd = weekEnds.max()
+        let overlappingTotalSubscriptions = activeSubscriptions.filter { item in
+            guard weeklyLimit(item) == nil,
+                  totalLimit(item) != nil,
+                  let weekWindowStart,
+                  let weekWindowEnd
+            else {
+                return false
+            }
+            return subscription(item, overlapsWindowStart: weekWindowStart, windowEnd: weekWindowEnd)
+        }
+
+        let weeklyTotal = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
             partial + (weeklyLimit(item) ?? 0)
+        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
+            partial + (totalLimit(item) ?? 0)
         }
-        let weeklyUsed = weeklySubscriptions.reduce(0) { partial, item in
+        let weeklyUsed = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
             partial + (weeklyLimit(item).map { _ in weeklyUsedAmount(item) } ?? 0)
+        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
+            partial + decimal(item.totalUsedUsd)
         }
-        let weeklyRemainingValues = weeklySubscriptions.map { weeklyRemainingAmountFromAPI($0) }
-        let hasWeeklyRemainingFromAPI = weeklyRemainingValues.contains { $0 != nil }
-        let weeklyRemainingFromAPI = weeklyRemainingValues.compactMap { $0 }.reduce(0, +)
-        let weeklyRemaining = hasWeeklyRemainingFromAPI ? weeklyRemainingFromAPI : max(0, weeklyTotal - weeklyUsed)
-
-        let weekStarts = weeklySubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
-        let weekEnds = weeklySubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let weeklyRemaining = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
+            let total = weeklyLimit(item) ?? 0
+            let remaining = weeklyRemainingAmountFromAPI(item) ?? max(0, total - weeklyUsedAmount(item))
+            return partial + remaining
+        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
+            let total = totalLimit(item) ?? 0
+            return partial + Swift.max(0, total - decimal(item.totalUsedUsd))
+        }
         let subscriptionsWithTotalLimit = activeSubscriptions.filter { totalLimit($0) != nil }
 
         let monthlyTotal = subscriptionsWithTotalLimit.reduce(0) { partial, item in
@@ -179,6 +206,19 @@ enum UsageAggregator {
         let duration = item.plan?.durationDays ?? 0
         let billing = billingType(item)
         return duration >= 30 || billing.contains("month")
+    }
+
+    private static func subscription(
+        _ item: SubscriptionItem,
+        overlapsWindowStart windowStart: Date,
+        windowEnd: Date
+    ) -> Bool {
+        guard let start = APIDateParser.parse(item.subscriptionStartAt),
+              let end = APIDateParser.parse(item.subscriptionEndAt)
+        else {
+            return false
+        }
+        return start < windowEnd && windowStart < end
     }
 
     private static func billingType(_ item: SubscriptionItem) -> String {

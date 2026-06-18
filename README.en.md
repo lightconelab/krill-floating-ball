@@ -8,13 +8,17 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 
 ## Screenshots
 
-| Menu Bar Icon | Menu Actions | Floating Ball |
-| --- | --- | --- |
-| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="260" alt="Menu actions"> | <img src="docs/images/floating-ball.png" width="120" alt="Floating ball"> |
-
-| Expanded Panel | Floating Overview |
+| Menu Bar Icon | Menu Actions |
 | --- | --- |
-| <img src="docs/images/expanded-panel.png" width="420" alt="Expanded panel"> | <img src="docs/images/floating-overview.png" width="520" alt="Floating overview"> |
+| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="260" alt="Menu actions"> |
+
+| Floating Overview | Expanded Panel | Floating Ball |
+| --- | --- | --- |
+| <img src="docs/images/floating-overview.png" width="420" alt="Floating overview"> | <img src="docs/images/expanded-panel.png" width="360" alt="Expanded panel"> | <img src="docs/images/floating-ball.png" width="120" alt="Floating ball"> |
+
+| Missing Token State | Token Prompt |
+| --- | --- |
+| <img src="docs/images/missing-token-overview.png" width="420" alt="Missing token state"> | <img src="docs/images/token-prompt.png" width="420" alt="Token prompt"> |
 
 | Krill Account Comparison |
 | --- |
@@ -46,7 +50,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 ## Install From Release
 
 1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.2.1-macOS-arm64.zip`.
+2. Unzip `Krill-Floating-Ball-v0.2.2-macOS-arm64.zip`.
 3. Open `Krill Floating Ball.app`.
 4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
 
@@ -80,7 +84,8 @@ The packaged app will be written to `dist/`.
 ## Data Scope
 
 - Active subscriptions are filtered by `active = true` and the current time being within `subscription_start_at` and `subscription_end_at`.
-- Weekly quota aggregates all active subscriptions.
+- The floating ball shows the current weekly availability pool: active subscriptions with weekly quota plus other active total-quota subscriptions whose subscription time range overlaps that weekly window.
+- The liquid color alert level is based on the remaining percentage of that weekly availability pool.
 - When `plan.billing_type = usd_monthly`, the subscription total quota is `quota.daily_limit_usd`, and it is not counted as weekly quota.
 - When `plan.billing_type = usd_weekly`, weekly quota is `quota.daily_limit_usd`, and the subscription total quota is `quota.daily_limit_usd * 4`.
 - Today's statistics are requested from the local day's `00:00:00` to the current time, using the user's current time zone.
