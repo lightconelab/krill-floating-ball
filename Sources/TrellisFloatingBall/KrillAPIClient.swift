@@ -22,6 +22,7 @@ struct APIBundle {
     let stats: StatsEnvelope
 }
 
+@MainActor
 struct KrillAPIClient {
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
@@ -95,13 +96,19 @@ private struct StatsRequestPayload: Encodable {
     }
 }
 
+@MainActor
 enum LocalProtocolDateFormatter {
-    static func string(from date: Date) -> String {
+    private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar.current
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return formatter
+    }()
+
+    static func string(from date: Date) -> String {
+        formatter.timeZone = TimeZone.current
         return formatter.string(from: date)
     }
 }
@@ -145,7 +152,6 @@ struct Plan: Decodable {
     let billingType: String?
     let dailyQuotaUsd: String?
     let durationDays: Int?
-    let entryRouteKeys: [String]?
     let name: String?
 
     enum CodingKeys: String, CodingKey {
@@ -153,7 +159,6 @@ struct Plan: Decodable {
         case billingType = "billing_type"
         case dailyQuotaUsd = "daily_quota_usd"
         case durationDays = "duration_days"
-        case entryRouteKeys = "entry_route_keys"
         case name
     }
 }

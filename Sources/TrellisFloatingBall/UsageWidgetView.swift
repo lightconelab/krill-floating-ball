@@ -7,8 +7,34 @@ final class UsageWidgetView: NSView {
         case panel
     }
 
+    enum BallPresentation {
+        case sphere
+        case edgeProgressBar
+    }
+
+    enum EdgeProgressAxis {
+        case horizontal
+        case vertical
+    }
+
     var refreshAction: (() -> Void)?
     var expansionChanged: ((Bool) -> Void)?
+    var dragBeganAction: (() -> Void)?
+    var dragUpdatedAction: ((NSRect) -> NSRect)?
+    var dragEndedAction: (() -> Void)?
+
+    var ballPresentation: BallPresentation = .sphere {
+        didSet {
+            needsDisplay = true
+            updateAnimationScheduling()
+        }
+    }
+
+    var edgeProgressAxis: EdgeProgressAxis = .horizontal {
+        didSet {
+            needsDisplay = true
+        }
+    }
 
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
@@ -21,6 +47,7 @@ final class UsageWidgetView: NSView {
         didSet {
             panelProgress = isExpanded ? max(panelProgress, 0.2) : panelProgress
             needsDisplay = true
+            updateAnimationScheduling()
         }
     }
 
@@ -31,7 +58,7 @@ final class UsageWidgetView: NSView {
     private let ballSize: CGFloat = 80
     private let ballInset: CGFloat = 12
     private let panelMinWidth: CGFloat = 460
-    private let panelMaxWidth: CGFloat = 460
+    private let panelMaxWidth: CGFloat = 620
     private let panelWeeklyCardHeight: CGFloat = 166
     private let panelTotalCardHeight: CGFloat = 122
     private let panelCardGap: CGFloat = 16
@@ -47,6 +74,9 @@ final class UsageWidgetView: NSView {
     private var displayTimer: Timer?
     private var tracking: NSTrackingArea?
     private var pendingCollapse: DispatchWorkItem?
+    private var collapseGeneration = 0
+    private var dragOffsetInWindow: NSPoint?
+    private var pointerIsHovering = false
     private let displayMode: DisplayMode
 
     init(frame frameRect: NSRect, displayMode: DisplayMode = .ball) {
@@ -61,6 +91,16 @@ final class UsageWidgetView: NSView {
         self.displayMode = .ball
         super.init(coder: coder)
         updateLayerScale()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        guard newWindow == nil else {
+            return
+        }
+        pointerIsHovering = false
+        cancelPendingCollapse()
+        stopDisplayTimer()
     }
 
     override func viewDidMoveToWindow() {
@@ -92,18 +132,24 @@ final class UsageWidgetView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        pendingCollapse?.cancel()
-        pendingCollapse = nil
+        pointerIsHovering = true
+        updateAnimationScheduling()
+        cancelPendingCollapse()
         expansionChanged?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
-        pendingCollapse?.cancel()
+        pointerIsHovering = false
+        updateAnimationScheduling()
+        cancelPendingCollapse()
+        collapseGeneration += 1
+        let generation = collapseGeneration
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else {
+                guard let self, self.collapseGeneration == generation else {
                     return
                 }
+                self.pendingCollapse = nil
                 if self.pointerIsInsideWidget() {
                     return
                 }
@@ -116,8 +162,38 @@ final class UsageWidgetView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if displayMode == .ball {
-            window?.performDrag(with: event)
+            dragBeganAction?()
+            if let window {
+                let mouse = NSEvent.mouseLocation
+                dragOffsetInWindow = NSPoint(x: mouse.x - window.frame.minX, y: mouse.y - window.frame.minY)
+            }
         }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard displayMode == .ball,
+              let window,
+              let dragOffsetInWindow
+        else {
+            return
+        }
+
+        let mouse = NSEvent.mouseLocation
+        var proposedFrame = window.frame
+        proposedFrame.origin = NSPoint(
+            x: mouse.x - dragOffsetInWindow.x,
+            y: mouse.y - dragOffsetInWindow.y
+        )
+        let targetFrame = dragUpdatedAction?(proposedFrame) ?? proposedFrame
+        window.setFrame(targetFrame, display: true)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard displayMode == .ball else {
+            return
+        }
+        dragOffsetInWindow = nil
+        dragEndedAction?()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -126,18 +202,23 @@ final class UsageWidgetView: NSView {
 
         switch displayMode {
         case .ball:
-            drawLiquidBall()
+            switch ballPresentation {
+            case .sphere:
+                drawLiquidBall()
+            case .edgeProgressBar:
+                drawEdgeProgressBar()
+            }
         case .panel:
             drawExpandedPanel(progress: 1)
         }
     }
 
-    func preferredPanelSize(maxHeight: CGFloat? = nil) -> NSSize {
+    func preferredPanelSize(maxHeight: CGFloat? = nil, maxWidth: CGFloat? = nil) -> NSSize {
         var panelHeight = preferredPanelHeight()
         if let maxHeight {
             panelHeight = min(panelHeight, max(180, maxHeight - 12))
         }
-        let width = preferredPanelWidth()
+        let width = preferredPanelWidth(maxWidth: maxWidth)
         let height = panelHeight
         return NSSize(width: width, height: height)
     }
@@ -155,16 +236,23 @@ final class UsageWidgetView: NSView {
             return
         }
         displayTimer?.invalidate()
-        let timer = Timer.scheduledTimer(
+        let timer = Timer(
             timeInterval: interval,
             target: self,
             selector: #selector(animationTimerFired),
             userInfo: nil,
             repeats: true
         )
+        timer.tolerance = min(interval * 0.35, 0.08)
         RunLoop.main.add(timer, forMode: .common)
         displayTimer = timer
         currentAnimationInterval = interval
+    }
+
+    private func cancelPendingCollapse() {
+        pendingCollapse?.cancel()
+        pendingCollapse = nil
+        collapseGeneration += 1
     }
 
     private func stopDisplayTimer() {
@@ -177,7 +265,11 @@ final class UsageWidgetView: NSView {
         guard displayMode == .ball else {
             return
         }
-        guard animationActive, window?.isVisible == true, let interval = animationFrameInterval() else {
+        guard ballPresentation == .sphere,
+              animationActive,
+              window?.isVisible == true,
+              let interval = animationFrameInterval()
+        else {
             stopDisplayTimer()
             return
         }
@@ -192,16 +284,17 @@ final class UsageWidgetView: NSView {
             return nil
         }
         if percent <= 10 {
-            return 1.0 / 12.0
+            return fluidAnimationBoosted ? 1.0 / 12.0 : 1.0 / 8.0
         }
         if percent <= 30 {
-            return 1.0 / 10.0
+            return fluidAnimationBoosted ? 1.0 / 10.0 : 1.0 / 6.0
         }
-        return 1.0 / 10.0
+        return fluidAnimationBoosted ? 1.0 / 10.0 : 1.0 / 4.0
     }
 
     @objc private func animationTimerFired(_ timer: Timer) {
-        guard animationActive,
+        guard ballPresentation == .sphere,
+              animationActive,
               window?.isVisible == true,
               let interval = currentAnimationInterval,
               let percent = snapshot.weeklyPercent
@@ -215,8 +308,12 @@ final class UsageWidgetView: NSView {
         } else {
             let phaseSpeed: CGFloat = percent <= 10 ? 1.6 : 1.05
             animationPhase += phaseSpeed * CGFloat(interval)
-            needsDisplay = true
+            setNeedsDisplay(ballRect().insetBy(dx: -4, dy: -4))
         }
+    }
+
+    private var fluidAnimationBoosted: Bool {
+        pointerIsHovering || isExpanded
     }
 
     private func updateLayerScale() {
@@ -324,7 +421,7 @@ final class UsageWidgetView: NSView {
 
     private func wavePath(in rect: NSRect, waterTop: CGFloat, amplitude: CGFloat, phase: CGFloat) -> NSBezierPath {
         let path = NSBezierPath()
-        let steps = 34
+        let steps = 28
         for index in 0...steps {
             let t = CGFloat(index) / CGFloat(steps)
             let x = rect.minX + t * rect.width
@@ -408,6 +505,63 @@ final class UsageWidgetView: NSView {
             color: color.withAlphaComponent(0.86),
             shadow: NSColor.black.withAlphaComponent(0.66)
         )
+    }
+
+    private func drawEdgeProgressBar() {
+        let visualThickness: CGFloat = 8
+        let rect: NSRect
+        switch edgeProgressAxis {
+        case .horizontal:
+            rect = pixelAligned(NSRect(
+                x: 5,
+                y: (bounds.height - visualThickness) / 2,
+                width: bounds.width - 10,
+                height: visualThickness
+            ))
+        case .vertical:
+            rect = pixelAligned(NSRect(
+                x: (bounds.width - visualThickness) / 2,
+                y: 5,
+                width: visualThickness,
+                height: bounds.height - 10
+            ))
+        }
+        let percentValue = snapshot.weeklyPercent
+        let percent = CGFloat(max(0, min(100, percentValue ?? 0)) / 100)
+        let tint = quotaColor(for: percentValue)
+        let radius = min(rect.width, rect.height) / 2
+        let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.18)
+        shadow.shadowBlurRadius = 6
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        NSColor.white.withAlphaComponent(0.72).setFill()
+        path.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        NSColor(hex: 0xCBD5E1, alpha: 0.82).setStroke()
+        path.lineWidth = 0.6
+        path.stroke()
+
+        if percent > 0 {
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            let fillRect: NSRect
+            switch edgeProgressAxis {
+            case .horizontal:
+                let fillWidth = min(rect.width, max(2, rect.width * percent))
+                fillRect = NSRect(x: rect.minX, y: rect.minY, width: fillWidth, height: rect.height)
+            case .vertical:
+                let fillHeight = min(rect.height, max(2, rect.height * percent))
+                fillRect = NSRect(x: rect.minX, y: rect.maxY - fillHeight, width: rect.width, height: fillHeight)
+            }
+            tint.withAlphaComponent(0.92).setFill()
+            NSBezierPath(rect: fillRect).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
     }
 
     private func liquidColor(for percent: Double?) -> NSColor {
@@ -661,18 +815,21 @@ final class UsageWidgetView: NSView {
         let body = rect.insetBy(dx: 16, dy: 14)
         let topY = body.minY
         let periodText = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
+        let periodFont = NSFont.monospacedDigitSystemFont(ofSize: 11.4, weight: .regular)
+        let periodWidth = min(body.width * 0.68, measuredWidth(periodText, font: periodFont) + 2)
+        let nameWidth = max(80, body.width - periodWidth - 14)
         let expiryStyle = expiryPillStyle(until: item.expiry, alpha: alpha)
 
         drawText(
             item.name,
-            rect: NSRect(x: body.minX, y: topY, width: body.width * 0.34, height: 18),
+            rect: NSRect(x: body.minX, y: topY, width: nameWidth, height: 18),
             font: .systemFont(ofSize: 15, weight: .medium),
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
         drawText(
             periodText,
-            rect: NSRect(x: body.minX + body.width * 0.35, y: topY + 1, width: body.width * 0.65, height: 16),
-            font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+            rect: NSRect(x: body.maxX - periodWidth, y: topY + 2, width: periodWidth, height: 15),
+            font: periodFont,
             color: NSColor(hex: 0xA3AFBD).withAlphaComponent(alpha),
             alignment: .right
         )
@@ -944,7 +1101,7 @@ final class UsageWidgetView: NSView {
 
     private func durationText(seconds: TimeInterval) -> String {
         if seconds <= 0 {
-            return "0分钟"
+            return "0分"
         }
         if seconds >= 86_400 {
             let days = Int(seconds / 86_400)
@@ -954,7 +1111,7 @@ final class UsageWidgetView: NSView {
                 normalizedDays += 1
                 hours = 0
             }
-            return "\(normalizedDays)天\(hours)小时"
+            return "\(normalizedDays)天\(hours)时"
         }
         if seconds >= 3_600 {
             let hours = Int(seconds / 3_600)
@@ -964,9 +1121,9 @@ final class UsageWidgetView: NSView {
                 normalizedHours += 1
                 minutes = 0
             }
-            return "\(normalizedHours)小时\(minutes)分钟"
+            return "\(normalizedHours)时\(minutes)分"
         }
-        return "\(max(1, Int(ceil(seconds / 60))))分钟"
+        return "\(max(1, Int(ceil(seconds / 60))))分"
     }
 
     private func preferredPanelHeight() -> CGFloat {
@@ -988,15 +1145,34 @@ final class UsageWidgetView: NSView {
         min(preferredPanelHeight(), max(180, bounds.height - 12))
     }
 
-    private func preferredPanelWidth() -> CGFloat {
-        panelMaxWidth
+    private func preferredPanelWidth(maxWidth: CGFloat? = nil) -> CGFloat {
+        let calculatedWidth = max(panelMinWidth, preferredSubscriptionContentWidth())
+        let availableWidth = maxWidth.map { max(panelMinWidth, $0) } ?? panelMaxWidth
+        return min(calculatedWidth, min(panelMaxWidth, availableWidth))
     }
 
     private func currentPanelWidth() -> CGFloat {
         if displayMode == .panel {
-            return min(preferredPanelWidth(), max(panelMinWidth, bounds.width))
+            return min(preferredPanelWidth(maxWidth: bounds.width), max(panelMinWidth, bounds.width))
         }
-        return min(preferredPanelWidth(), max(panelMinWidth, bounds.width - ballInset - ballSize - 12 - expandedRightPadding))
+        return min(preferredPanelWidth(maxWidth: bounds.width), max(panelMinWidth, bounds.width - ballInset - ballSize - 12 - expandedRightPadding))
+    }
+
+    private func preferredSubscriptionContentWidth() -> CGFloat {
+        guard snapshot.subscriptions.isEmpty == false else {
+            return panelMinWidth
+        }
+
+        let nameFont = NSFont.systemFont(ofSize: 15, weight: .medium)
+        let periodFont = NSFont.monospacedDigitSystemFont(ofSize: 11.4, weight: .regular)
+        let maxRowWidth = snapshot.subscriptions.reduce(CGFloat(0)) { width, item in
+            let periodText = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
+            let nameWidth = measuredWidth(item.name, font: nameFont)
+            let periodWidth = measuredWidth(periodText, font: periodFont)
+            return max(width, nameWidth + 14 + periodWidth)
+        }
+
+        return maxRowWidth + panelContentInset * 2 + 32
     }
 
     private func angledPanelPath(_ rect: NSRect) -> NSBezierPath {
@@ -1004,17 +1180,23 @@ final class UsageWidgetView: NSView {
         return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     }
 
-    private func fittedMonospacedFont(text: String, maxSize: CGFloat, minSize: CGFloat, width: CGFloat) -> NSFont {
+    private func fittedMonospacedFont(
+        text: String,
+        maxSize: CGFloat,
+        minSize: CGFloat,
+        width: CGFloat,
+        weight: NSFont.Weight = .bold
+    ) -> NSFont {
         var size = maxSize
         while size > minSize {
-            let font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: .bold)
+            let font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
             let measured = (text as NSString).size(withAttributes: [.font: font]).width
             if measured <= width {
                 return font
             }
             size -= 0.5
         }
-        return .monospacedDigitSystemFont(ofSize: minSize, weight: .bold)
+        return .monospacedDigitSystemFont(ofSize: minSize, weight: weight)
     }
 
     private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
@@ -1045,6 +1227,7 @@ final class UsageWidgetView: NSView {
     ) {
         let style = NSMutableParagraphStyle()
         style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
         var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,
@@ -1073,6 +1256,7 @@ final class UsageWidgetView: NSView {
     ) {
         let style = NSMutableParagraphStyle()
         style.alignment = alignment
+        style.lineBreakMode = .byTruncatingTail
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,

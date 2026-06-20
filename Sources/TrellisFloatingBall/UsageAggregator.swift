@@ -1,5 +1,6 @@
 import Foundation
 
+@MainActor
 enum UsageAggregator {
     static func makeSnapshot(bundle: APIBundle, now: Date = Date()) throws -> UsageSnapshot {
         guard let subscriptionData = bundle.subscription.data else {
@@ -35,7 +36,6 @@ enum UsageAggregator {
                 name: item.plan?.name ?? "未命名套餐",
                 start: start,
                 expiry: expiry,
-                endpoints: item.plan?.entryRouteKeys ?? [],
                 weeklyRemaining: weeklyRemaining,
                 weeklyUsed: weeklyUsed,
                 weeklyTotal: weeklyTotal,
@@ -243,28 +243,43 @@ enum UsageAggregator {
     }
 }
 
+@MainActor
 enum APIDateParser {
+    private static let internetDateTimeWithFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let internetDateTime: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    private static let dateOnlyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
     static func parse(_ value: String?) -> Date? {
         guard let value, value.isEmpty == false else {
             return nil
         }
 
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) {
+        if let date = internetDateTimeWithFractionalSeconds.date(from: value) {
             return date
         }
 
-        formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: value) {
+        if let date = internetDateTime.date(from: value) {
             return date
         }
 
-        let dateOnlyFormatter = DateFormatter()
-        dateOnlyFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateOnlyFormatter.calendar = Calendar(identifier: .gregorian)
         dateOnlyFormatter.timeZone = TimeZone.current
-        dateOnlyFormatter.dateFormat = "yyyy-MM-dd"
         return dateOnlyFormatter.date(from: value)
     }
 }

@@ -10,7 +10,6 @@ struct SubscriptionDisplayItem: Equatable {
     let name: String
     let start: Date?
     let expiry: Date?
-    let endpoints: [String]
     let weeklyRemaining: Double?
     let weeklyUsed: Double?
     let weeklyTotal: Double?

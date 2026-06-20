@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var refreshIntervalMenuItem: NSMenuItem?
     private var launchAtLoginMenuItem: NSMenuItem?
+    private var edgeProgressMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -54,6 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let launchItem = NSMenuItem(title: LaunchAtLoginController.menuTitle(), action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         launchAtLoginMenuItem = launchItem
         menu.addItem(launchItem)
+        let edgeItem = NSMenuItem(title: "贴边进度条", action: #selector(toggleEdgeProgress), keyEquivalent: "")
+        edgeProgressMenuItem = edgeItem
+        menu.addItem(edgeItem)
         menu.addItem(NSMenuItem(title: "设置 Krill Token...", action: #selector(setToken), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "清除 Token", action: #selector(clearToken), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -72,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         updateLaunchAtLoginMenuItem()
+        updateEdgeProgressMenuItem()
     }
 
     private func updateStatusTooltip(_ snapshot: UsageSnapshot) {
@@ -132,6 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func toggleEdgeProgress() {
+        let enabled = EdgeProgressPreference.isEnabled == false
+        floatingController.setEdgeProgressEnabled(enabled)
+        updateEdgeProgressMenuItem()
+    }
+
     @objc private func setToken() {
         promptForToken()
     }
@@ -189,6 +200,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshIntervalTitle() -> String {
         "刷新间隔：\(usageStore.currentRefreshIntervalSeconds()) 秒..."
+    }
+
+    private func updateEdgeProgressMenuItem() {
+        edgeProgressMenuItem?.state = EdgeProgressPreference.isEnabled ? .on : .off
     }
 
     private func updateLaunchAtLoginMenuItem() {

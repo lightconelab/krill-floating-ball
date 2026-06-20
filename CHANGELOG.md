@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.3 - 2026-06-21
+
+- Added the edge quota bar mode: the floating ball can snap to a slim vertical or horizontal quota bar near screen edges, enabled by default and configurable from the menu bar.
+- Tightened drag constraints so the widget cannot disappear outside the visible area, including multi-display setups.
+- Improved CPU behavior by lowering idle animation cadence, stopping liquid animation when the edge bar is active, limiting redraw regions, and adding timer tolerance.
+- Improved long-running memory stability by canceling refresh tasks on stop, releasing hidden panel windows, canceling pending hover-collapse work, and removing window observers when hidden.
+- Cached the Keychain token after first successful load and stored it with `kSecAttrAccessibleAfterFirstUnlock` to reduce repeated password prompts in normal use.
+- Updated active subscription display details, compact time labels, weekly/total quota rendering, and current quota calculation rules.
+- Refreshed README screenshots for menu actions, vertical/horizontal edge quota bars, and CPU usage in edge-bar and floating-ball modes.
+- Updated Chinese and English documentation for the new edge quota bar behavior and v0.2.3 release asset.
+
 ## v0.2.2 - 2026-06-18
 
 - Corrected the floating ball weekly availability pool to include active total-quota subscriptions whose active time range overlaps the current weekly quota window.

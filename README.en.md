@@ -16,6 +16,10 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 | --- | --- | --- |
 | <img src="docs/images/floating-overview.png" width="420" alt="Floating overview"> | <img src="docs/images/expanded-panel.png" width="360" alt="Expanded panel"> | <img src="docs/images/floating-ball.png" width="120" alt="Floating ball"> |
 
+| Edge Quota Bar (Vertical) | Edge Quota Bar (Horizontal) |
+| --- | --- |
+| <img src="docs/images/edge-progress-vertical.png" width="420" alt="Vertical edge quota bar"> | <img src="docs/images/edge-progress-horizontal.png" width="420" alt="Horizontal edge quota bar"> |
+
 | Missing Token State | Token Prompt |
 | --- | --- |
 | <img src="docs/images/missing-token-overview.png" width="420" alt="Missing token state"> | <img src="docs/images/token-prompt.png" width="420" alt="Token prompt"> |
@@ -28,10 +32,15 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 | --- | --- | --- |
 | <img src="docs/images/cpu-usage.png" width="300" alt="CPU usage"> | <img src="docs/images/memory-usage.png" width="300" alt="Memory usage"> | <img src="docs/images/energy-impact.png" width="300" alt="Energy impact"> |
 
+| Edge Bar CPU Usage | Floating Ball CPU Usage |
+| --- | --- |
+| <img src="docs/images/edge-progress-cpu.png" width="420" alt="Edge bar CPU usage"> | <img src="docs/images/floating-ball-cpu.png" width="420" alt="Floating ball CPU usage"> |
+
 ## Features
 
 - Native Swift/AppKit implementation with no Dock icon and a lightweight menu bar entry.
 - Always-on-top draggable 80px floating ball.
+- Automatically snaps to a slim edge quota bar near screen edges by default, with a menu toggle to disable it.
 - Low-overhead rendering: the floating animation runs only when needed, and the hover panel window is released after collapse.
 - Liquid quota indicator: the fill level follows weekly remaining quota, with stronger colors and pulse effects at low quota.
 - Hover panel showing today's spend, request count, cache rate, wallet balance, refresh time, and all active subscriptions, making it easy to compare against the Krill account center.
@@ -50,7 +59,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 ## Install From Release
 
 1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.2.2-macOS-arm64.zip`.
+2. Unzip `Krill-Floating-Ball-v0.2.3-macOS-arm64.zip`.
 3. Open `Krill Floating Ball.app`.
 4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
 
