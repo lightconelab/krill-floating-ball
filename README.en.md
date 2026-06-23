@@ -45,6 +45,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 - Liquid quota indicator: the fill level follows weekly remaining quota, with stronger colors and pulse effects at low quota.
 - Hover panel showing usage statistics, wallet balance, refresh time, and all active subscriptions, making it easy to compare against the Krill account center.
 - Usage statistics support quota week, subscription period, today, 7-day, and 30-day ranges. Spend, requests, and Tokens include sparklines, while cache rates are shown per channel.
+- Large statistics ranges are requested in 7-day chunks and parsed for only the required fields to reduce peak memory usage when switching ranges.
 - Configurable auto-refresh interval from the menu bar. The default interval is 30 seconds, and the next automatic refresh is scheduled after the previous refresh finishes.
 - Manual refresh, token setup, token clearing, launch-at-login toggle, and quit actions are available from the menu bar.
 - Failed refreshes keep the previous successful data and do not overwrite the last successful refresh time.
@@ -60,7 +61,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 ## Install From Release
 
 1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.2.4-macOS-arm64.zip`.
+2. Unzip `Krill-Floating-Ball-v0.2.5-macOS-arm64.zip`.
 3. Open `Krill Floating Ball.app`.
 4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
 

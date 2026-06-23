@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum KrillAPIError: LocalizedError {
@@ -29,6 +30,8 @@ struct KrillAPIClient {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
         static let sampledTrendLimit = 64
+        static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
+        static let statsChunkLength: TimeInterval = 7 * 86_400
     }
 
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
@@ -66,6 +69,16 @@ struct KrillAPIClient {
     }
 
     private func fetchStats(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
+        guard shouldChunkStats(range) == false else {
+            let envelope = try await fetchChunkedStats(token: token, range: range)
+            releaseUnusedHeapMemory()
+            return envelope
+        }
+
+        return try await fetchStatsChunk(token: token, range: range)
+    }
+
+    private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
         var request = URLRequest(url: statsURL)
         request.httpMethod = "POST"
         request.timeoutInterval = Network.resourceTimeout
@@ -79,9 +92,44 @@ struct KrillAPIClient {
         )
         request.httpBody = try JSONEncoder().encode(payload)
 
-        let (data, response) = try await session.data(for: request)
+        let (fileURL, response) = try await session.download(for: request)
+        defer {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
         try validate(response)
-        return try decode(StatsEnvelope.self, from: data)
+        return try StatsJSONParser.decodeEnvelope(from: fileURL, trendLimit: Network.sampledTrendLimit)
+    }
+
+    private func fetchChunkedStats(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
+        var accumulator = StatsAccumulator()
+        var chunkStart = range.start
+        var chunkCount = 0
+
+        while chunkStart < range.end {
+            try Task.checkCancellation()
+            let chunkEnd = min(chunkStart.addingTimeInterval(Network.statsChunkLength), range.end)
+            let chunkRange = StatsRangeContext(
+                requested: range.requested,
+                effective: range.effective,
+                start: chunkStart,
+                end: chunkEnd,
+                availableRanges: range.availableRanges
+            )
+            let envelope = try await fetchStatsChunk(token: token, range: chunkRange)
+            accumulator.append(envelope.data)
+            chunkStart = chunkEnd
+            chunkCount += 1
+            if chunkCount.isMultiple(of: 3) {
+                releaseUnusedHeapMemory()
+            }
+            await Task.yield()
+        }
+
+        return StatsEnvelope(code: nil, data: accumulator.payload(), success: true)
+    }
+
+    private func shouldChunkStats(_ range: StatsRangeContext) -> Bool {
+        range.end.timeIntervalSince(range.start) > Network.chunkedStatsThreshold
     }
 
     private func applyCommonHeaders(to request: inout URLRequest, token: String) {
@@ -110,6 +158,11 @@ struct KrillAPIClient {
         try autoreleasepool {
             try JSONDecoder().decode(type, from: data)
         }
+    }
+
+    @discardableResult
+    private func releaseUnusedHeapMemory() -> Int {
+        malloc_zone_pressure_relief(nil, 0)
     }
 }
 
@@ -215,6 +268,25 @@ struct StatsEnvelope: Decodable {
     let code: Int?
     let data: StatsPayload?
     let success: Bool?
+
+    init(code: Int?, data: StatsPayload?, success: Bool?) {
+        self.code = code
+        self.data = data
+        self.success = success
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.code = try container.decodeIfPresent(Int.self, forKey: .code)
+        self.data = try container.decodeIfPresent(StatsPayload.self, forKey: .data)
+        self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case data
+        case success
+    }
 }
 
 struct StatsPayload: Decodable {
@@ -223,6 +295,20 @@ struct StatsPayload: Decodable {
     let totalRequests: Int?
     let totalTokens: Int?
     let trend: [StatsTrendPoint]?
+
+    init(
+        channelCacheRates: [ChannelCacheRate]?,
+        totalCostUsd: String?,
+        totalRequests: Int?,
+        totalTokens: Int?,
+        trend: [StatsTrendPoint]?
+    ) {
+        self.channelCacheRates = channelCacheRates
+        self.totalCostUsd = totalCostUsd
+        self.totalRequests = totalRequests
+        self.totalTokens = totalTokens
+        self.trend = trend
+    }
 
     enum CodingKeys: String, CodingKey {
         case channelCacheRates = "channel_cache_rates"
@@ -251,6 +337,12 @@ struct StatsTrendPoint: Decodable {
     let totalCostUsd: String?
     let totalTokens: Int?
 
+    init(requestCount: Int?, totalCostUsd: String?, totalTokens: Int?) {
+        self.requestCount = requestCount
+        self.totalCostUsd = totalCostUsd
+        self.totalTokens = totalTokens
+    }
+
     enum CodingKeys: String, CodingKey {
         case requestCount = "request_count"
         case totalCostUsd = "total_cost_usd"
@@ -269,9 +361,647 @@ struct ChannelCacheRate: Decodable {
     let cacheRate: Double?
     let channelName: String?
 
+    init(cacheRate: Double?, channelName: String?) {
+        self.cacheRate = cacheRate
+        self.channelName = channelName
+    }
+
     enum CodingKeys: String, CodingKey {
         case cacheRate = "cache_rate"
         case channelName = "channel_name"
+    }
+}
+
+private struct StatsAccumulator {
+    private var totalCost = 0.0
+    private var hasTotalCost = false
+    private var totalRequests = 0
+    private var hasTotalRequests = false
+    private var totalTokens = 0
+    private var hasTotalTokens = false
+    private var trend: [StatsTrendPoint] = []
+    private var cacheRates: [String: CacheRateAccumulator] = [:]
+
+    mutating func append(_ payload: StatsPayload?) {
+        guard let payload else {
+            return
+        }
+
+        if let costText = payload.totalCostUsd,
+           let cost = Double(costText.trimmingCharacters(in: .whitespacesAndNewlines)),
+           cost.isFinite {
+            totalCost += cost
+            hasTotalCost = true
+        }
+        if let requests = payload.totalRequests {
+            totalRequests += requests
+            hasTotalRequests = true
+        }
+        if let tokens = payload.totalTokens {
+            totalTokens += tokens
+            hasTotalTokens = true
+        }
+
+        if let points = payload.trend, points.isEmpty == false {
+            trend.append(contentsOf: points)
+            if trend.count > KrillAPIClient.Network.sampledTrendLimit * 4 {
+                trend = downsample(trend, maxCount: KrillAPIClient.Network.sampledTrendLimit * 2)
+            }
+        }
+
+        let cacheWeight = max(1, payload.totalRequests ?? 0)
+        for rate in payload.channelCacheRates ?? [] {
+            let name = rate.channelName ?? "未知渠道"
+            guard let percent = rate.cacheRate, percent.isFinite else {
+                continue
+            }
+            cacheRates[name, default: CacheRateAccumulator()].append(rate: percent, weight: cacheWeight)
+        }
+    }
+
+    func payload() -> StatsPayload {
+        let channels = cacheRates
+            .map { name, accumulator in
+                ChannelCacheRate(cacheRate: accumulator.rate, channelName: name)
+            }
+            .sorted { ($0.channelName ?? "") < ($1.channelName ?? "") }
+
+        return StatsPayload(
+            channelCacheRates: channels.isEmpty ? nil : channels,
+            totalCostUsd: hasTotalCost ? formatDecimal(totalCost) : nil,
+            totalRequests: hasTotalRequests ? totalRequests : nil,
+            totalTokens: hasTotalTokens ? totalTokens : nil,
+            trend: trend.isEmpty ? nil : downsample(trend, maxCount: KrillAPIClient.Network.sampledTrendLimit)
+        )
+    }
+
+    private func downsample<T>(_ items: [T], maxCount: Int) -> [T] {
+        guard items.count > maxCount, maxCount > 1 else {
+            return items
+        }
+
+        let step = Double(items.count - 1) / Double(maxCount - 1)
+        return (0..<maxCount).map { index in
+            let sourceIndex = min(items.count - 1, Int((Double(index) * step).rounded()))
+            return items[sourceIndex]
+        }
+    }
+
+    private func formatDecimal(_ value: Double) -> String {
+        let formatted = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), value)
+        return formatted
+            .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+    }
+}
+
+private struct CacheRateAccumulator {
+    private var weightedRate = 0.0
+    private var totalWeight = 0
+
+    var rate: Double? {
+        guard totalWeight > 0 else {
+            return nil
+        }
+        return weightedRate / Double(totalWeight)
+    }
+
+    mutating func append(rate: Double, weight: Int) {
+        let clampedWeight = max(1, weight)
+        weightedRate += max(0, min(1, rate)) * Double(clampedWeight)
+        totalWeight += clampedWeight
+    }
+}
+
+private enum StatsJSONParser {
+    static func decodeEnvelope(from fileURL: URL, trendLimit: Int) throws -> StatsEnvelope {
+        try autoreleasepool {
+            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+            var scanner = JSONScanner(data: data, trendLimit: trendLimit)
+            return try scanner.parseStatsEnvelope()
+        }
+    }
+}
+
+private enum JSONScanError: Error {
+    case unexpectedEnd
+    case unexpectedToken
+    case invalidString
+}
+
+private struct JSONScanner {
+    private let data: Data
+    private let trendLimit: Int
+    private var index: Data.Index
+
+    init(data: Data, trendLimit: Int) {
+        self.data = data
+        self.trendLimit = trendLimit
+        self.index = data.startIndex
+    }
+
+    mutating func parseStatsEnvelope() throws -> StatsEnvelope {
+        try consumeObjectStart()
+        var code: Int?
+        var payload: StatsPayload?
+        var success: Bool?
+
+        while try consumeObjectEndIfPresent() == false {
+            let key = try parseString()
+            try consumeColon()
+            switch key {
+            case "code":
+                code = try parseFlexibleInt()
+            case "data":
+                payload = try consumeNullIfPresent() ? nil : parseStatsPayload()
+            case "success":
+                success = try parseBoolOrNull()
+            default:
+                try skipValue()
+            }
+            try consumeCommaOrObjectEnd()
+            if previousByteWasObjectEnd {
+                break
+            }
+        }
+
+        return StatsEnvelope(code: code, data: payload, success: success)
+    }
+
+    private mutating func parseStatsPayload() throws -> StatsPayload {
+        try consumeObjectStart()
+        var channelCacheRates: [ChannelCacheRate]?
+        var totalCostUsd: String?
+        var totalRequests: Int?
+        var totalTokens: Int?
+        var trend: [StatsTrendPoint]?
+
+        while try consumeObjectEndIfPresent() == false {
+            let key = try parseString()
+            try consumeColon()
+            switch key {
+            case "channel_cache_rates":
+                channelCacheRates = try parseChannelCacheRates()
+            case "total_cost_usd":
+                totalCostUsd = try parseFlexibleString()
+            case "total_requests":
+                totalRequests = try parseFlexibleInt()
+            case "total_tokens":
+                totalTokens = try parseFlexibleInt()
+            case "trend":
+                trend = try parseTrendArray()
+            default:
+                try skipValue()
+            }
+            try consumeCommaOrObjectEnd()
+            if previousByteWasObjectEnd {
+                break
+            }
+        }
+
+        return StatsPayload(
+            channelCacheRates: channelCacheRates,
+            totalCostUsd: totalCostUsd,
+            totalRequests: totalRequests,
+            totalTokens: totalTokens,
+            trend: trend
+        )
+    }
+
+    private mutating func parseChannelCacheRates() throws -> [ChannelCacheRate]? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        try consumeArrayStart()
+        var rates: [ChannelCacheRate] = []
+
+        while try consumeArrayEndIfPresent() == false {
+            rates.append(try parseChannelCacheRate())
+            try consumeCommaOrArrayEnd()
+            if previousByteWasArrayEnd {
+                break
+            }
+        }
+
+        return rates
+    }
+
+    private mutating func parseChannelCacheRate() throws -> ChannelCacheRate {
+        try consumeObjectStart()
+        var cacheRate: Double?
+        var channelName: String?
+
+        while try consumeObjectEndIfPresent() == false {
+            let key = try parseString()
+            try consumeColon()
+            switch key {
+            case "cache_rate":
+                cacheRate = try parseFlexibleDouble()
+            case "channel_name":
+                channelName = try parseFlexibleString()
+            default:
+                try skipValue()
+            }
+            try consumeCommaOrObjectEnd()
+            if previousByteWasObjectEnd {
+                break
+            }
+        }
+
+        return ChannelCacheRate(cacheRate: cacheRate, channelName: channelName)
+    }
+
+    private mutating func parseTrendArray() throws -> [StatsTrendPoint]? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        try consumeArrayStart()
+        var points: [StatsTrendPoint] = []
+        points.reserveCapacity(min(trendLimit * 2, 128))
+
+        while try consumeArrayEndIfPresent() == false {
+            points.append(try parseTrendPoint())
+            if points.count > trendLimit * 4 {
+                points = downsample(points, maxCount: trendLimit * 2)
+            }
+            try consumeCommaOrArrayEnd()
+            if previousByteWasArrayEnd {
+                break
+            }
+        }
+
+        return points.isEmpty ? nil : downsample(points, maxCount: trendLimit)
+    }
+
+    private mutating func parseTrendPoint() throws -> StatsTrendPoint {
+        try consumeObjectStart()
+        var requestCount: Int?
+        var totalCostUsd: String?
+        var totalTokens: Int?
+
+        while try consumeObjectEndIfPresent() == false {
+            let key = try parseString()
+            try consumeColon()
+            switch key {
+            case "request_count":
+                requestCount = try parseFlexibleInt()
+            case "total_cost_usd":
+                totalCostUsd = try parseFlexibleString()
+            case "total_tokens":
+                totalTokens = try parseFlexibleInt()
+            default:
+                try skipValue()
+            }
+            try consumeCommaOrObjectEnd()
+            if previousByteWasObjectEnd {
+                break
+            }
+        }
+
+        return StatsTrendPoint(requestCount: requestCount, totalCostUsd: totalCostUsd, totalTokens: totalTokens)
+    }
+
+    private var previousByteWasObjectEnd = false
+    private var previousByteWasArrayEnd = false
+
+    private mutating func consumeObjectStart() throws {
+        previousByteWasObjectEnd = false
+        try consume(123)
+    }
+
+    private mutating func consumeArrayStart() throws {
+        previousByteWasArrayEnd = false
+        try consume(91)
+    }
+
+    private mutating func consumeObjectEndIfPresent() throws -> Bool {
+        skipWhitespace()
+        if currentByte == 125 {
+            advance()
+            previousByteWasObjectEnd = true
+            return true
+        }
+        previousByteWasObjectEnd = false
+        return false
+    }
+
+    private mutating func consumeArrayEndIfPresent() throws -> Bool {
+        skipWhitespace()
+        if currentByte == 93 {
+            advance()
+            previousByteWasArrayEnd = true
+            return true
+        }
+        previousByteWasArrayEnd = false
+        return false
+    }
+
+    private mutating func consumeCommaOrObjectEnd() throws {
+        skipWhitespace()
+        if currentByte == 44 {
+            advance()
+            previousByteWasObjectEnd = false
+            return
+        }
+        if currentByte == 125 {
+            advance()
+            previousByteWasObjectEnd = true
+            return
+        }
+        throw JSONScanError.unexpectedToken
+    }
+
+    private mutating func consumeCommaOrArrayEnd() throws {
+        skipWhitespace()
+        if currentByte == 44 {
+            advance()
+            previousByteWasArrayEnd = false
+            return
+        }
+        if currentByte == 93 {
+            advance()
+            previousByteWasArrayEnd = true
+            return
+        }
+        throw JSONScanError.unexpectedToken
+    }
+
+    private mutating func consumeColon() throws {
+        try consume(58)
+    }
+
+    private mutating func consume(_ byte: UInt8) throws {
+        skipWhitespace()
+        guard currentByte == byte else {
+            throw JSONScanError.unexpectedToken
+        }
+        advance()
+    }
+
+    private mutating func parseString() throws -> String {
+        skipWhitespace()
+        guard currentByte == 34 else {
+            throw JSONScanError.unexpectedToken
+        }
+        advance()
+
+        var bytes: [UInt8] = []
+        var result = ""
+
+        func flushBytes() throws {
+            guard bytes.isEmpty == false else {
+                return
+            }
+            guard let text = String(bytes: bytes, encoding: .utf8) else {
+                throw JSONScanError.invalidString
+            }
+            result += text
+            bytes.removeAll(keepingCapacity: true)
+        }
+
+        while let byte = currentByte {
+            advance()
+            if byte == 34 {
+                try flushBytes()
+                return result
+            }
+            if byte == 92 {
+                try flushBytes()
+                result += try parseEscapedCharacter()
+            } else {
+                bytes.append(byte)
+            }
+        }
+
+        throw JSONScanError.unexpectedEnd
+    }
+
+    private mutating func parseEscapedCharacter() throws -> String {
+        guard let byte = currentByte else {
+            throw JSONScanError.unexpectedEnd
+        }
+        advance()
+
+        switch byte {
+        case 34:
+            return "\""
+        case 92:
+            return "\\"
+        case 47:
+            return "/"
+        case 98:
+            return "\u{08}"
+        case 102:
+            return "\u{0C}"
+        case 110:
+            return "\n"
+        case 114:
+            return "\r"
+        case 116:
+            return "\t"
+        case 117:
+            let scalar = try parseUnicodeEscape()
+            return String(scalar)
+        default:
+            throw JSONScanError.invalidString
+        }
+    }
+
+    private mutating func parseUnicodeEscape() throws -> UnicodeScalar {
+        let value = try parseFourHexDigits()
+        guard let scalar = UnicodeScalar(value) else {
+            throw JSONScanError.invalidString
+        }
+        return scalar
+    }
+
+    private mutating func parseFourHexDigits() throws -> UInt32 {
+        var value: UInt32 = 0
+        for _ in 0..<4 {
+            guard let byte = currentByte, let digit = hexValue(byte) else {
+                throw JSONScanError.invalidString
+            }
+            value = value * 16 + UInt32(digit)
+            advance()
+        }
+        return value
+    }
+
+    private func hexValue(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57:
+            return byte - 48
+        case 65...70:
+            return byte - 55
+        case 97...102:
+            return byte - 87
+        default:
+            return nil
+        }
+    }
+
+    private mutating func parseFlexibleString() throws -> String? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        if currentByte == 34 {
+            return try parseString()
+        }
+        return try parseNumberString()
+    }
+
+    private mutating func parseFlexibleInt() throws -> Int? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        let text = currentByte == 34 ? try parseString() : try parseNumberString()
+        guard let number = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)), number.isFinite else {
+            return nil
+        }
+        return Int(number.rounded())
+    }
+
+    private mutating func parseFlexibleDouble() throws -> Double? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        let text = currentByte == 34 ? try parseString() : try parseNumberString()
+        guard let number = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)), number.isFinite else {
+            return nil
+        }
+        return number
+    }
+
+    private mutating func parseBoolOrNull() throws -> Bool? {
+        if try consumeNullIfPresent() {
+            return nil
+        }
+        if consumeLiteral("true") {
+            return true
+        }
+        if consumeLiteral("false") {
+            return false
+        }
+        throw JSONScanError.unexpectedToken
+    }
+
+    private mutating func parseNumberString() throws -> String {
+        skipWhitespace()
+        let start = index
+        while let byte = currentByte, isNumberByte(byte) {
+            advance()
+        }
+        guard start != index else {
+            throw JSONScanError.unexpectedToken
+        }
+        return String(decoding: data[start..<index], as: UTF8.self)
+    }
+
+    private func isNumberByte(_ byte: UInt8) -> Bool {
+        switch byte {
+        case 43, 45, 46, 48...57, 69, 101:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private mutating func consumeNullIfPresent() throws -> Bool {
+        skipWhitespace()
+        return consumeLiteral("null")
+    }
+
+    private mutating func consumeLiteral(_ literal: String) -> Bool {
+        let bytes = Array(literal.utf8)
+        guard data.distance(from: index, to: data.endIndex) >= bytes.count else {
+            return false
+        }
+        var cursor = index
+        for byte in bytes {
+            guard data[cursor] == byte else {
+                return false
+            }
+            cursor = data.index(after: cursor)
+        }
+        index = cursor
+        return true
+    }
+
+    private mutating func skipValue() throws {
+        skipWhitespace()
+        guard let byte = currentByte else {
+            throw JSONScanError.unexpectedEnd
+        }
+
+        switch byte {
+        case 123:
+            try skipObject()
+        case 91:
+            try skipArray()
+        case 34:
+            _ = try parseString()
+        case 110:
+            guard try consumeNullIfPresent() else {
+                throw JSONScanError.unexpectedToken
+            }
+        case 116, 102:
+            _ = try parseBoolOrNull()
+        default:
+            _ = try parseNumberString()
+        }
+    }
+
+    private mutating func skipObject() throws {
+        try consumeObjectStart()
+        while try consumeObjectEndIfPresent() == false {
+            _ = try parseString()
+            try consumeColon()
+            try skipValue()
+            try consumeCommaOrObjectEnd()
+            if previousByteWasObjectEnd {
+                break
+            }
+        }
+    }
+
+    private mutating func skipArray() throws {
+        try consumeArrayStart()
+        while try consumeArrayEndIfPresent() == false {
+            try skipValue()
+            try consumeCommaOrArrayEnd()
+            if previousByteWasArrayEnd {
+                break
+            }
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while let byte = currentByte, byte == 32 || byte == 10 || byte == 13 || byte == 9 {
+            advance()
+        }
+    }
+
+    private var currentByte: UInt8? {
+        guard index < data.endIndex else {
+            return nil
+        }
+        return data[index]
+    }
+
+    private mutating func advance() {
+        index = data.index(after: index)
+    }
+
+    private func downsample<T>(_ items: [T], maxCount: Int) -> [T] {
+        guard items.count > maxCount, maxCount > 1 else {
+            return items
+        }
+
+        let step = Double(items.count - 1) / Double(maxCount - 1)
+        return (0..<maxCount).map { index in
+            let sourceIndex = min(items.count - 1, Int((Double(index) * step).rounded()))
+            return items[sourceIndex]
+        }
     }
 }
 

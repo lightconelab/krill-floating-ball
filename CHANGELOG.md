@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.5 - 2026-06-23
+
+- Fixed the widget restore path so showing the hidden widget always brings back the normal floating ball unless it is actually attached to a screen edge.
+- Kept the floating ball draggable while the expanded panel is open by ordering the ball window above the panel window.
+- Improved expanded-panel placement so it adapts to the available side space and reduces unnecessary blank width.
+- Refined usage statistic cards with centered icon/title headers, centered values, and sparklines without the extra baseline.
+- Reduced memory growth when switching larger statistic ranges by requesting long ranges in 7-day chunks, parsing only the required JSON fields, limiting trend samples, and releasing heap pressure between chunks.
+- Refreshed README screenshots for the expanded panel, floating overview, and edge-bar overview.
+
 ## v0.2.4 - 2026-06-23
 
 - Added multi-range usage statistics for quota week, subscription period, today, last 7 days, and last 30 days.

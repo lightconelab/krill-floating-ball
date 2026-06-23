@@ -71,6 +71,7 @@ final class UsageWidgetView: NSView {
     private let ballSize: CGFloat = 80
     private let ballInset: CGFloat = 12
     private let panelMinWidth: CGFloat = 620
+    private let panelCompactMinWidth: CGFloat = 420
     private let panelMaxWidth: CGFloat = 860
     private let panelWeeklyCardHeight: CGFloat = 166
     private let panelTotalCardHeight: CGFloat = 122
@@ -806,7 +807,9 @@ final class UsageWidgetView: NSView {
         let iconRect: NSRect?
         switch content.style {
         case .inlineTrend:
-            iconRect = content.showsIcon ? NSRect(x: rect.minX + 9, y: rect.minY + 9, width: 22, height: 22) : nil
+            let titleWidth = measuredWidth(content.title, font: titleFont)
+            let headerWidth = min(rect.width - 12, 22 + 6 + titleWidth)
+            iconRect = content.showsIcon ? NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 9, width: 22, height: 22) : nil
         case .cacheBars, .centeredValue:
             let titleWidth = measuredWidth(content.title, font: titleFont)
             let headerWidth = min(rect.width - 12, 22 + 6 + titleWidth)
@@ -817,28 +820,19 @@ final class UsageWidgetView: NSView {
         let valueRect: NSRect
         switch content.style {
         case .inlineTrend:
-            let leftPadding: CGFloat = 10
-            let rightPadding: CGFloat = 10
-            let gap: CGFloat = 8
-            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.minX + leftPadding
-            let inlineTextY = iconRect.map { $0.midY - 8 } ?? rect.minY + 12
-            let availableWidth = max(46, rect.maxX - titleX - rightPadding)
-            let titleWidth = min(
-                max(24, availableWidth - gap - 26),
-                measuredWidth(content.title, font: titleFont) + 3
-            )
-            let valueWidth = max(26, availableWidth - titleWidth - gap)
+            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
+            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
             titleRect = NSRect(
                 x: titleX,
-                y: inlineTextY,
+                y: rect.minY + 13,
                 width: titleWidth,
-                height: 16
+                height: 14
             )
             valueRect = NSRect(
-                x: rect.maxX - rightPadding - valueWidth,
-                y: inlineTextY,
-                width: valueWidth,
-                height: 16
+                x: rect.minX + 8,
+                y: rect.maxY - 24,
+                width: rect.width - 16,
+                height: 17
             )
         case .cacheBars:
             let titleWidth = measuredWidth(content.title, font: titleFont) + 2
@@ -877,13 +871,6 @@ final class UsageWidgetView: NSView {
 
         switch content.style {
         case .inlineTrend:
-            drawText(
-                content.value,
-                rect: valueRect,
-                font: fittedMonospacedFont(text: content.value, maxSize: 12.2, minSize: 9.2, width: valueRect.width, weight: .bold),
-                color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
-                alignment: .right
-            )
             if let trend = content.trend {
                 drawSparkline(
                     trend: trend,
@@ -892,6 +879,13 @@ final class UsageWidgetView: NSView {
                     alpha: alpha
                 )
             }
+            drawText(
+                content.value,
+                rect: valueRect,
+                font: fittedMonospacedFont(text: content.value, maxSize: 12.8, minSize: 9.8, width: valueRect.width, weight: .bold),
+                color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+                alignment: .center
+            )
         case .cacheBars:
             drawCacheRateBars(in: rect.insetBy(dx: 8, dy: 8), tint: content.tint, alpha: alpha)
         case .centeredValue:
@@ -1041,13 +1035,6 @@ final class UsageWidgetView: NSView {
     }
 
     private func drawSparkline(trend: StatTrendKind, rect: NSRect, tint: NSColor, alpha: CGFloat) {
-        let baseline = NSBezierPath()
-        baseline.move(to: NSPoint(x: rect.minX, y: rect.midY))
-        baseline.line(to: NSPoint(x: rect.maxX, y: rect.midY))
-        baseline.lineWidth = 1
-        NSColor(hex: 0xD8E0EA, alpha: 0.78 * alpha).setStroke()
-        baseline.stroke()
-
         let cleanValues = snapshot.trend.compactMap { point -> Double? in
             switch trend {
             case .cost:
@@ -1096,7 +1083,7 @@ final class UsageWidgetView: NSView {
 
     private func sparklineRect(in rect: NSRect) -> NSRect {
         let top = rect.minY + 36
-        let bottomPadding: CGFloat = 11
+        let bottomPadding: CGFloat = 30
         let availableHeight = max(18, rect.maxY - top - bottomPadding)
         let height = snapshot.cacheRates.count <= 1
             ? min(34, availableHeight)
@@ -1680,7 +1667,7 @@ final class UsageWidgetView: NSView {
 
     private func preferredPanelWidth(maxWidth: CGFloat? = nil) -> CGFloat {
         let calculatedWidth = max(panelMinWidth, preferredSubscriptionContentWidth(), preferredStatsContentWidth())
-        let availableWidth = maxWidth.map { max(panelMinWidth, $0) } ?? panelMaxWidth
+        let availableWidth = maxWidth.map { max(panelCompactMinWidth, $0) } ?? panelMaxWidth
         return min(calculatedWidth, min(panelMaxWidth, availableWidth))
     }
 
@@ -1722,10 +1709,10 @@ final class UsageWidgetView: NSView {
             ("请求数", Formatters.integer(snapshot.requestCount)),
             ("Tokens", Formatters.compactInteger(snapshot.totalTokens))
         ]
-        let inlineCardWidth = inlineValues.reduce(CGFloat(132)) { width, item in
+        let inlineCardWidth = inlineValues.reduce(CGFloat(122)) { width, item in
             let titleWidth = measuredWidth(item.0, font: .systemFont(ofSize: 11, weight: .medium))
             let valueWidth = measuredWidth(item.1, font: valueFont)
-            return max(width, titleWidth + valueWidth + 64)
+            return max(width, titleWidth + 50, valueWidth + 24)
         }
         let centeredCardWidth = max(
             CGFloat(112),

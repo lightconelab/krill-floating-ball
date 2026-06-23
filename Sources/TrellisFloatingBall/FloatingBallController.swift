@@ -91,7 +91,11 @@ final class FloatingBallController {
 
     func show() {
         if window.isVisible == false {
-            window.setFrame(defaultFrame(), display: true)
+            attachedEdge = nil
+            let frame = defaultFrame()
+            ballView.ballPresentation = .sphere
+            ballView.frame = NSRect(origin: .zero, size: frame.size)
+            window.setFrame(frame, display: true)
         } else {
             window.setFrame(pixelAligned(window.frame, on: window.screen), display: true)
         }
@@ -276,12 +280,17 @@ final class FloatingBallController {
         panelWindow.setFrame(startFrame, display: true)
         panelWindow.alphaValue = 0
         panelWindow.orderFrontRegardless()
+        keepBallWindowAbovePanel()
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panelWindow.animator().alphaValue = 1
             panelWindow.animator().setFrame(targetFrame, display: true)
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.keepBallWindowAbovePanel()
+            }
         }
     }
 
@@ -339,6 +348,7 @@ final class FloatingBallController {
         } else {
             panelWindow.setFrame(frame, display: true)
         }
+        keepBallWindowAbovePanel()
     }
 
     private func targetPanelFrame() -> NSRect {
@@ -346,9 +356,25 @@ final class FloatingBallController {
         let visible = screen.visibleFrame
         let maxHeight = visible.height - 24
         let maxWidth = visible.width - 24
-        let size = panelView.preferredPanelSize(maxHeight: maxHeight, maxWidth: maxWidth)
         let ballFrame = panelAnchorFrame(on: screen)
-        let shouldOpenRight = panelShouldOpenRight(anchor: ballFrame, visible: visible)
+        let horizontalInset: CGFloat = 12
+        let preferredRight = panelShouldOpenRight(anchor: ballFrame, visible: visible)
+        let rightSpace = visible.maxX - ballFrame.maxX - Layout.panelGap - horizontalInset
+        let leftSpace = ballFrame.minX - visible.minX - Layout.panelGap - horizontalInset
+        let minimumUsefulPanelWidth: CGFloat = 420
+        let shouldOpenRight: Bool
+
+        if preferredRight {
+            shouldOpenRight = rightSpace >= minimumUsefulPanelWidth
+                || (leftSpace < minimumUsefulPanelWidth && rightSpace >= leftSpace)
+        } else {
+            shouldOpenRight = !(leftSpace >= minimumUsefulPanelWidth
+                || (rightSpace < minimumUsefulPanelWidth && leftSpace > rightSpace))
+        }
+
+        let sideSpace = shouldOpenRight ? rightSpace : leftSpace
+        let constrainedMaxWidth = min(maxWidth, max(minimumUsefulPanelWidth, sideSpace))
+        let size = panelView.preferredPanelSize(maxHeight: maxHeight, maxWidth: constrainedMaxWidth)
         var frame = NSRect(
             x: shouldOpenRight ? ballFrame.maxX + Layout.panelGap : ballFrame.minX - size.width - Layout.panelGap,
             y: ballFrame.midY - size.height / 2,
@@ -356,12 +382,6 @@ final class FloatingBallController {
             height: size.height
         )
 
-        if shouldOpenRight, frame.maxX > visible.maxX - 12 {
-            frame.origin.x = ballFrame.minX - size.width - Layout.panelGap
-        }
-        if shouldOpenRight == false, frame.minX < visible.minX + 12 {
-            frame.origin.x = ballFrame.maxX + Layout.panelGap
-        }
         frame.origin.x = min(frame.origin.x, visible.maxX - frame.width - 12)
         frame.origin.x = max(frame.origin.x, visible.minX + 12)
         frame.origin.y = min(frame.origin.y, visible.maxY - frame.height - 12)
@@ -384,6 +404,13 @@ final class FloatingBallController {
         let panel = makeWindow(contentView: panelView, frame: defaultPanelFrame())
         panelWindow = panel
         return panel
+    }
+
+    private func keepBallWindowAbovePanel() {
+        guard let panelWindow, panelWindow.isVisible else {
+            return
+        }
+        window.order(.above, relativeTo: panelWindow.windowNumber)
     }
 
     private func panelSlideOffset(for frame: NSRect) -> CGFloat {

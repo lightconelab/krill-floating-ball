@@ -63,6 +63,10 @@ final class UsageStore {
         }
         selectedStatsRange = range
         refreshGeneration += 1
+        if isRefreshing {
+            needsRefreshAfterCurrent = true
+            refreshTask?.cancel()
+        }
         if snapshot.availableStatsRanges.contains(range), snapshot.statsRange != range {
             snapshot.statsRange = range
             snapshot.todayCost = nil
@@ -73,10 +77,6 @@ final class UsageStore {
             snapshot.isLoading = true
             snapshot.lastError = nil
             emit()
-        }
-        if isRefreshing {
-            needsRefreshAfterCurrent = true
-            refreshTask?.cancel()
         }
         refresh(manual: true)
     }
