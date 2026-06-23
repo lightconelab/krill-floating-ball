@@ -22,9 +22,13 @@ final class UsageWidgetView: NSView {
     var dragBeganAction: (() -> Void)?
     var dragUpdatedAction: ((NSRect) -> NSRect)?
     var dragEndedAction: (() -> Void)?
+    var statsRangeChanged: ((StatsRange) -> Void)?
 
     var ballPresentation: BallPresentation = .sphere {
         didSet {
+            guard oldValue != ballPresentation else {
+                return
+            }
             needsDisplay = true
             updateAnimationScheduling()
         }
@@ -32,12 +36,18 @@ final class UsageWidgetView: NSView {
 
     var edgeProgressAxis: EdgeProgressAxis = .horizontal {
         didSet {
+            guard oldValue != edgeProgressAxis else {
+                return
+            }
             needsDisplay = true
         }
     }
 
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
+            guard shouldRedrawSnapshotChange(from: oldValue, to: snapshot) else {
+                return
+            }
             needsDisplay = true
             updateAnimationScheduling()
         }
@@ -45,6 +55,9 @@ final class UsageWidgetView: NSView {
 
     var isExpanded = false {
         didSet {
+            guard oldValue != isExpanded else {
+                return
+            }
             panelProgress = isExpanded ? max(panelProgress, 0.2) : panelProgress
             needsDisplay = true
             updateAnimationScheduling()
@@ -57,13 +70,13 @@ final class UsageWidgetView: NSView {
 
     private let ballSize: CGFloat = 80
     private let ballInset: CGFloat = 12
-    private let panelMinWidth: CGFloat = 460
-    private let panelMaxWidth: CGFloat = 620
+    private let panelMinWidth: CGFloat = 620
+    private let panelMaxWidth: CGFloat = 860
     private let panelWeeklyCardHeight: CGFloat = 166
     private let panelTotalCardHeight: CGFloat = 122
     private let panelCardGap: CGFloat = 16
     private let panelBottomPadding: CGFloat = 20
-    private let panelListTopOffset: CGFloat = 176
+    private let statsHeaderHeight: CGFloat = 32
     private let panelContentInset: CGFloat = 20
     private let expandedRightPadding: CGFloat = 16
 
@@ -74,6 +87,7 @@ final class UsageWidgetView: NSView {
     private var displayTimer: Timer?
     private var tracking: NSTrackingArea?
     private var pendingCollapse: DispatchWorkItem?
+    private var statsRangeButtonRects: [(range: StatsRange, rect: NSRect)] = []
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
@@ -161,6 +175,11 @@ final class UsageWidgetView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if displayMode == .panel {
+            handlePanelMouseDown(event)
+            return
+        }
+
         if displayMode == .ball {
             dragBeganAction?()
             if let window {
@@ -196,6 +215,19 @@ final class UsageWidgetView: NSView {
         dragEndedAction?()
     }
 
+    private func handlePanelMouseDown(_ event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        for item in statsRangeButtonRects.reversed() {
+            guard item.rect.contains(point),
+                  snapshot.availableStatsRanges.contains(item.range)
+            else {
+                continue
+            }
+            statsRangeChanged?(item.range)
+            return
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill()
@@ -227,8 +259,26 @@ final class UsageWidgetView: NSView {
         guard displayMode == .ball else {
             return
         }
+        guard animationActive != active else {
+            return
+        }
         animationActive = active
         updateAnimationScheduling()
+    }
+
+    private func shouldRedrawSnapshotChange(from oldSnapshot: UsageSnapshot, to newSnapshot: UsageSnapshot) -> Bool {
+        guard oldSnapshot != newSnapshot else {
+            return false
+        }
+
+        guard displayMode == .ball else {
+            return true
+        }
+
+        return oldSnapshot.weeklyRemaining != newSnapshot.weeklyRemaining
+            || oldSnapshot.weeklyTotal != newSnapshot.weeklyTotal
+            || oldSnapshot.weekEnd != newSnapshot.weekEnd
+            || oldSnapshot.needsToken != newSnapshot.needsToken
     }
 
     private func startDisplayTimer(interval: TimeInterval) {
@@ -600,100 +650,554 @@ final class UsageWidgetView: NSView {
     private enum StatIcon {
         case spending
         case requests
+        case tokens
         case cache
         case wallet
     }
 
+    private enum StatCardStyle {
+        case inlineTrend
+        case cacheBars
+        case centeredValue
+    }
+
+    private enum StatTrendKind {
+        case cost
+        case requests
+        case tokens
+    }
+
+    private struct StatCardContent {
+        let title: String
+        let value: String
+        let icon: StatIcon
+        let tint: NSColor
+        let trend: StatTrendKind?
+        let style: StatCardStyle
+        let showsIcon: Bool
+    }
+
     private func drawStatsSummary(in rect: NSRect, state: QuotaState, alpha: CGFloat) {
+        statsRangeButtonRects.removeAll(keepingCapacity: true)
         let content = NSRect(
             x: rect.minX + panelContentInset,
             y: rect.minY + panelContentInset,
             width: rect.width - panelContentInset * 2,
-            height: 118
+            height: statsSectionHeight()
+        )
+        let title = "使用统计"
+        let titleFont = sectionTitleFont()
+        let titleWidth = measuredWidth(title, font: titleFont) + 4
+        let refreshFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let refreshWidth = measuredWidth("刷新时间：00:00:00", font: refreshFont) + 6
+        let rangeWidth = statsRangeButtonsWidth()
+        let rangeStartX = content.maxX - rangeWidth
+        let refreshX = content.minX + titleWidth + 14
+        let availableRefreshWidth = max(88, rangeStartX - refreshX - 12)
+        let refreshRect = NSRect(
+            x: refreshX,
+            y: content.minY + 5,
+            width: min(refreshWidth, availableRefreshWidth),
+            height: 14
+        )
+        drawStatsRangeButtons(
+            in: content,
+            startX: rangeStartX,
+            maxX: content.maxX,
+            alpha: alpha
         )
         drawText(
-            "今日统计",
-            rect: NSRect(x: content.minX + 2, y: content.minY, width: 88, height: 18),
-            font: sectionTitleFont(),
+            title,
+            rect: NSRect(x: content.minX + 2, y: content.minY + 2, width: titleWidth, height: 18),
+            font: titleFont,
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
         drawText(
             "刷新时间：\(Formatters.time(snapshot.lastRefresh))",
-            rect: NSRect(x: content.maxX - 160, y: content.minY + 2, width: 160, height: 14),
-            font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+            rect: refreshRect,
+            font: refreshFont,
             color: NSColor(hex: 0x94A3B8).withAlphaComponent(alpha),
-            alignment: .right
+            alignment: .left
         )
+        drawStatsStatus(in: content, refreshRect: refreshRect, rangeStartX: rangeStartX, alpha: alpha)
 
-        let meta = [
-            ("花费", Formatters.usd(snapshot.todayCost), StatIcon.spending, NSColor(hex: 0x1A56DB)),
-            ("请求数", snapshot.requestCount.map(String.init) ?? "--", StatIcon.requests, NSColor(hex: 0x7C3AED)),
-            ("缓存率", cacheSummaryText(), StatIcon.cache, NSColor(hex: 0x0D9F6E)),
-            ("钱包余额", Formatters.usd(snapshot.walletBalance), StatIcon.wallet, NSColor(hex: 0x64748B))
+        let cards = [
+            StatCardContent(
+                title: "花费",
+                value: Formatters.usd(snapshot.todayCost),
+                icon: .spending,
+                tint: NSColor(hex: 0x1A56DB),
+                trend: .cost,
+                style: .inlineTrend,
+                showsIcon: true
+            ),
+            StatCardContent(
+                title: "请求数",
+                value: Formatters.integer(snapshot.requestCount),
+                icon: .requests,
+                tint: NSColor(hex: 0x7C3AED),
+                trend: .requests,
+                style: .inlineTrend,
+                showsIcon: true
+            ),
+            StatCardContent(
+                title: "Tokens",
+                value: Formatters.compactInteger(snapshot.totalTokens),
+                icon: .tokens,
+                tint: NSColor(hex: 0xEA580C),
+                trend: .tokens,
+                style: .inlineTrend,
+                showsIcon: true
+            ),
+            StatCardContent(
+                title: "缓存率",
+                value: "",
+                icon: .cache,
+                tint: NSColor(hex: 0x0D9F6E),
+                trend: nil,
+                style: .cacheBars,
+                showsIcon: true
+            ),
+            StatCardContent(
+                title: "钱包余额",
+                value: Formatters.usd(snapshot.walletBalance),
+                icon: .wallet,
+                tint: NSColor(hex: 0x64748B),
+                trend: nil,
+                style: .centeredValue,
+                showsIcon: true
+            )
         ]
 
         let itemGap: CGFloat = 8
-        let cardY = content.minY + 29
-        let itemWidth: CGFloat = (content.width - itemGap * CGFloat(meta.count - 1)) / CGFloat(meta.count)
-        for (index, item) in meta.enumerated() {
+        let cardHeight = statsCardHeight()
+        let cardY = content.minY + statsHeaderHeight
+        let itemWidth: CGFloat = (content.width - itemGap * CGFloat(cards.count - 1)) / CGFloat(cards.count)
+        for (index, item) in cards.enumerated() {
             let x = content.minX + CGFloat(index) * (itemWidth + itemGap)
             drawStatCard(
-                title: item.0,
-                value: item.1,
-                icon: item.2,
-                tint: item.3,
-                rect: NSRect(x: x, y: cardY, width: itemWidth, height: 70),
-                valueFont: .monospacedDigitSystemFont(ofSize: index == 1 ? 19 : 17.5, weight: .semibold),
+                item,
+                rect: NSRect(x: x, y: cardY, width: itemWidth, height: cardHeight),
                 alpha: alpha
             )
         }
 
         let line = NSBezierPath()
-        line.move(to: NSPoint(x: content.minX, y: content.maxY))
-        line.line(to: NSPoint(x: content.maxX, y: content.maxY))
+        line.move(to: NSPoint(x: content.minX, y: content.maxY - 1))
+        line.line(to: NSPoint(x: content.maxX, y: content.maxY - 1))
         line.lineWidth = 1
         NSColor(hex: 0xDDE3EB, alpha: alpha).setStroke()
         line.stroke()
     }
 
     private func drawStatCard(
-        title: String,
-        value: String,
-        icon: StatIcon,
-        tint: NSColor,
+        _ content: StatCardContent,
         rect: NSRect,
-        valueFont: NSFont,
         alpha: CGFloat
     ) {
         let card = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
-        NSColor.white.withAlphaComponent(alpha).setFill()
+        statCardBackgroundColor(alpha: alpha).setFill()
         card.fill()
-        NSColor(hex: 0xE5EAF0, alpha: alpha).setStroke()
+        statCardBorderColor(alpha: alpha).setStroke()
         card.lineWidth = 0.8
         card.stroke()
 
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let titleWidth = measuredWidth(title, font: titleFont)
-        let headerWidth = min(rect.width - 12, 24 + 6 + titleWidth)
-        let iconRect = NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 10, width: 24, height: 24)
-        tint.blended(withFraction: 0.90, of: .white)?.withAlphaComponent(alpha).setFill()
-        NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
-        drawStatIcon(icon, in: iconRect.insetBy(dx: 5, dy: 5), tint: tint, alpha: alpha)
+        let iconRect: NSRect?
+        switch content.style {
+        case .inlineTrend:
+            iconRect = content.showsIcon ? NSRect(x: rect.minX + 9, y: rect.minY + 9, width: 22, height: 22) : nil
+        case .cacheBars, .centeredValue:
+            let titleWidth = measuredWidth(content.title, font: titleFont)
+            let headerWidth = min(rect.width - 12, 22 + 6 + titleWidth)
+            iconRect = content.showsIcon ? NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 9, width: 22, height: 22) : nil
+        }
+
+        let titleRect: NSRect
+        let valueRect: NSRect
+        switch content.style {
+        case .inlineTrend:
+            let leftPadding: CGFloat = 10
+            let rightPadding: CGFloat = 10
+            let gap: CGFloat = 8
+            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.minX + leftPadding
+            let inlineTextY = iconRect.map { $0.midY - 8 } ?? rect.minY + 12
+            let availableWidth = max(46, rect.maxX - titleX - rightPadding)
+            let titleWidth = min(
+                max(24, availableWidth - gap - 26),
+                measuredWidth(content.title, font: titleFont) + 3
+            )
+            let valueWidth = max(26, availableWidth - titleWidth - gap)
+            titleRect = NSRect(
+                x: titleX,
+                y: inlineTextY,
+                width: titleWidth,
+                height: 16
+            )
+            valueRect = NSRect(
+                x: rect.maxX - rightPadding - valueWidth,
+                y: inlineTextY,
+                width: valueWidth,
+                height: 16
+            )
+        case .cacheBars:
+            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
+            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
+            titleRect = NSRect(x: titleX, y: rect.minY + 13, width: titleWidth, height: 14)
+            valueRect = NSRect(x: rect.minX + 6, y: rect.minY + 43, width: rect.width - 12, height: 22)
+        case .centeredValue:
+            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
+            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
+            let lowerTop = rect.minY + 36
+            let valueHeight: CGFloat = 22
+            let lowerHeight = max(valueHeight, rect.maxY - lowerTop - 8)
+            titleRect = NSRect(x: titleX, y: rect.minY + 13, width: titleWidth, height: 14)
+            valueRect = NSRect(
+                x: rect.minX + 6,
+                y: lowerTop + (lowerHeight - valueHeight) / 2,
+                width: rect.width - 12,
+                height: valueHeight
+            )
+        }
+
+        if let iconRect {
+            content.tint.blended(withFraction: 0.90, of: .white)?.withAlphaComponent(alpha).setFill()
+            NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
+            let iconInset = min(4.8, iconRect.width * 0.22)
+            drawStatIcon(content.icon, in: iconRect.insetBy(dx: iconInset, dy: iconInset), tint: content.tint, alpha: alpha)
+        }
 
         drawText(
-            title,
-            rect: NSRect(x: iconRect.maxX + 6, y: rect.minY + 15, width: titleWidth, height: 14),
+            content.title,
+            rect: titleRect,
             font: titleFont,
             color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
             alignment: .left
         )
+
+        switch content.style {
+        case .inlineTrend:
+            drawText(
+                content.value,
+                rect: valueRect,
+                font: fittedMonospacedFont(text: content.value, maxSize: 12.2, minSize: 9.2, width: valueRect.width, weight: .bold),
+                color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+                alignment: .right
+            )
+            if let trend = content.trend {
+                drawSparkline(
+                    trend: trend,
+                    rect: sparklineRect(in: rect),
+                    tint: content.tint,
+                    alpha: alpha
+                )
+            }
+        case .cacheBars:
+            drawCacheRateBars(in: rect.insetBy(dx: 8, dy: 8), tint: content.tint, alpha: alpha)
+        case .centeredValue:
+            drawText(
+                content.value,
+                rect: valueRect,
+                font: fittedMonospacedFont(text: content.value, maxSize: 16.2, minSize: 12.0, width: valueRect.width, weight: .semibold),
+                color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+                alignment: .center
+            )
+        }
+        drawStatCardOverlayIfNeeded(in: rect, alpha: alpha)
+    }
+
+    private func drawStatsStatus(in content: NSRect, refreshRect: NSRect, rangeStartX: CGFloat, alpha: CGFloat) {
+        let status: (text: String, color: NSColor)?
+        if snapshot.isLoading {
+            status = ("更新中", NSColor(hex: 0x1A56DB))
+        } else if snapshot.lastError != nil {
+            status = ("获取失败", NSColor(hex: 0xE02D3C))
+        } else {
+            status = nil
+        }
+
+        guard let status else {
+            return
+        }
+
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let width = min(56, max(44, measuredWidth(status.text, font: font) + 16))
+        let rect = NSRect(
+            x: min(refreshRect.maxX + 8, rangeStartX - width - 8),
+            y: content.minY + 1,
+            width: width,
+            height: 20
+        )
+        guard rect.minX > refreshRect.minX else {
+            return
+        }
+
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        status.color.withAlphaComponent(0.10 * alpha).setFill()
+        path.fill()
+        status.color.withAlphaComponent(0.30 * alpha).setStroke()
+        path.lineWidth = 0.7
+        path.stroke()
         drawText(
-            value,
-            rect: NSRect(x: rect.minX + 6, y: rect.minY + 44, width: rect.width - 12, height: 22),
-            font: valueFont,
-            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+            status.text,
+            rect: NSRect(x: rect.minX + 4, y: rect.minY + 5, width: rect.width - 8, height: 11),
+            font: font,
+            color: status.color.withAlphaComponent(alpha),
             alignment: .center
         )
+    }
+
+    private func statCardBackgroundColor(alpha: CGFloat) -> NSColor {
+        if snapshot.isLoading {
+            return NSColor(hex: 0xF6FAFF, alpha: alpha)
+        }
+        if snapshot.lastError != nil {
+            return NSColor(hex: 0xFFF8F8, alpha: alpha)
+        }
+        return NSColor.white.withAlphaComponent(alpha)
+    }
+
+    private func statCardBorderColor(alpha: CGFloat) -> NSColor {
+        if snapshot.isLoading {
+            return NSColor(hex: 0xBBD4FF, alpha: 0.9 * alpha)
+        }
+        if snapshot.lastError != nil {
+            return NSColor(hex: 0xF3B9BE, alpha: 0.9 * alpha)
+        }
+        return NSColor(hex: 0xE5EAF0, alpha: alpha)
+    }
+
+    private func drawStatCardOverlayIfNeeded(in rect: NSRect, alpha: CGFloat) {
+        let text: String
+        let color: NSColor
+        if snapshot.isLoading {
+            text = "更新中"
+            color = NSColor(hex: 0x1A56DB)
+        } else if snapshot.lastError != nil {
+            text = "获取失败"
+            color = NSColor(hex: 0xE02D3C)
+        } else {
+            return
+        }
+
+        drawText(
+            text,
+            rect: NSRect(x: rect.minX + 10, y: rect.maxY - 20, width: rect.width - 20, height: 12),
+            font: .systemFont(ofSize: 10.5, weight: .semibold),
+            color: color.withAlphaComponent(0.78 * alpha),
+            alignment: .center
+        )
+    }
+
+    private func drawStatsRangeButtons(in rect: NSRect, startX: CGFloat, maxX: CGFloat, alpha: CGFloat) {
+        let ranges = StatsRange.allCases
+        let font = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let gap: CGFloat = 4
+        let widths = statsRangeButtonWidths(font: font)
+        let totalWidth = statsRangeButtonsWidth(widths: widths, gap: gap)
+        var x = min(startX, maxX - totalWidth)
+        let y = rect.minY
+
+        for (index, range) in ranges.enumerated() {
+            let width = widths[index]
+            let buttonRect = NSRect(x: x, y: y, width: width, height: 22)
+            let enabled = snapshot.availableStatsRanges.contains(range)
+            let selected = snapshot.statsRange == range
+            let background: NSColor
+            let foreground: NSColor
+            let border: NSColor
+
+            if selected {
+                background = NSColor(hex: 0x1A56DB, alpha: 0.92 * alpha)
+                foreground = NSColor.white.withAlphaComponent(alpha)
+                border = NSColor(hex: 0x1A56DB, alpha: alpha)
+            } else if enabled {
+                background = NSColor.white.withAlphaComponent(0.88 * alpha)
+                foreground = NSColor(hex: 0x475569).withAlphaComponent(alpha)
+                border = NSColor(hex: 0xD8E0EA, alpha: alpha)
+            } else {
+                background = NSColor(hex: 0xE8EEF5, alpha: 0.55 * alpha)
+                foreground = NSColor(hex: 0xA3AFBD).withAlphaComponent(0.72 * alpha)
+                border = NSColor(hex: 0xD8E0EA, alpha: 0.45 * alpha)
+            }
+
+            let path = NSBezierPath(roundedRect: buttonRect, xRadius: 7, yRadius: 7)
+            background.setFill()
+            path.fill()
+            border.setStroke()
+            path.lineWidth = 0.7
+            path.stroke()
+            drawText(
+                range.title,
+                rect: NSRect(x: buttonRect.minX + 3, y: buttonRect.minY + 5, width: buttonRect.width - 6, height: 12),
+                font: font,
+                color: foreground,
+                alignment: .center
+            )
+
+            statsRangeButtonRects.append((range, buttonRect))
+            x += width + gap
+        }
+    }
+
+    private func drawSparkline(trend: StatTrendKind, rect: NSRect, tint: NSColor, alpha: CGFloat) {
+        let baseline = NSBezierPath()
+        baseline.move(to: NSPoint(x: rect.minX, y: rect.midY))
+        baseline.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+        baseline.lineWidth = 1
+        NSColor(hex: 0xD8E0EA, alpha: 0.78 * alpha).setStroke()
+        baseline.stroke()
+
+        let cleanValues = snapshot.trend.compactMap { point -> Double? in
+            switch trend {
+            case .cost:
+                return point.cost?.isFinite == true ? point.cost : nil
+            case .requests:
+                return point.requestCount.map(Double.init)
+            case .tokens:
+                return point.tokens.map(Double.init)
+            }
+        }
+
+        guard cleanValues.count >= 2 else {
+            return
+        }
+
+        guard let minValue = cleanValues.min(),
+              let maxValue = cleanValues.max()
+        else {
+            return
+        }
+
+        let plotRect = rect.insetBy(dx: 0, dy: 3)
+        let valueRange = max(maxValue - minValue, 0.000_001)
+        let stepX = cleanValues.count == 1 ? 0 : plotRect.width / CGFloat(cleanValues.count - 1)
+        let path = NSBezierPath()
+
+        for (index, value) in cleanValues.enumerated() {
+            let normalized = CGFloat((value - minValue) / valueRange)
+            let point = NSPoint(
+                x: plotRect.minX + CGFloat(index) * stepX,
+                y: plotRect.maxY - normalized * plotRect.height
+            )
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.line(to: point)
+            }
+        }
+
+        tint.withAlphaComponent(0.88 * alpha).setStroke()
+        path.lineWidth = 1.6
+        path.lineJoinStyle = .round
+        path.lineCapStyle = .round
+        path.stroke()
+    }
+
+    private func sparklineRect(in rect: NSRect) -> NSRect {
+        let top = rect.minY + 36
+        let bottomPadding: CGFloat = 11
+        let availableHeight = max(18, rect.maxY - top - bottomPadding)
+        let height = snapshot.cacheRates.count <= 1
+            ? min(34, availableHeight)
+            : availableHeight
+        return NSRect(
+            x: rect.minX + 9,
+            y: top,
+            width: rect.width - 18,
+            height: height
+        )
+    }
+
+    private func drawCacheRateBars(in rect: NSRect, tint: NSColor, alpha: CGFloat) {
+        guard snapshot.cacheRates.isEmpty == false else {
+            drawText(
+                "--",
+                rect: NSRect(x: rect.minX, y: rect.minY + 38, width: rect.width, height: 14),
+                font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+                color: NSColor(hex: 0x0F172A).withAlphaComponent(alpha),
+                alignment: .center
+            )
+            return
+        }
+
+        let rates = snapshot.cacheRates
+        let contentY = rect.minY + 32
+        let contentHeight = max(18, rect.maxY - contentY - 2)
+        let lineHeight = max(8.5, min(18, contentHeight / CGFloat(rates.count)))
+        let labelFontSize = max(5.8, min(8.0, lineHeight * 0.42))
+        let labelFont = NSFont.systemFont(ofSize: labelFontSize, weight: .medium)
+        let barHeight = max(2.8, min(5.2, lineHeight * 0.34))
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: max(7.0, min(9.0, lineHeight * 0.46)), weight: .semibold)
+        let valueWidth = max(28, measuredWidth("100%", font: valueFont) + 2)
+        let barWidth = max(20, rect.width - valueWidth - 7)
+        var y = contentY + max(0, (contentHeight - lineHeight * CGFloat(rates.count)) / 2)
+
+        for (index, rate) in rates.enumerated() {
+            let percent = max(0, min(100, rate.percent))
+            let barTint = cacheRateColor(index: index)
+            let rowRect = NSRect(x: rect.minX, y: y, width: rect.width, height: lineHeight)
+            let labelHeight = max(6.2, min(8.8, lineHeight * 0.48))
+            let labelRect = NSRect(
+                x: rowRect.minX,
+                y: rowRect.minY,
+                width: barWidth,
+                height: labelHeight
+            )
+            drawText(
+                rate.name,
+                rect: labelRect,
+                font: fittedSystemFont(text: rate.name, maxSize: labelFont.pointSize, minSize: 5.4, width: labelRect.width, weight: .medium),
+                color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
+                alignment: .left
+            )
+
+            let trackY = min(rowRect.maxY - barHeight, labelRect.maxY + max(1, (rowRect.height - labelHeight - barHeight) / 2))
+            let track = pixelAligned(NSRect(
+                x: rect.minX,
+                y: trackY,
+                width: barWidth,
+                height: barHeight
+            ))
+            let trackPath = NSBezierPath(roundedRect: track, xRadius: barHeight / 2, yRadius: barHeight / 2)
+            NSColor(hex: 0xE8EEF5, alpha: alpha).setFill()
+            trackPath.fill()
+
+            if percent > 0 {
+                NSGraphicsContext.saveGraphicsState()
+                trackPath.addClip()
+                barTint.withAlphaComponent(0.88 * alpha).setFill()
+                NSBezierPath(rect: NSRect(
+                    x: track.minX,
+                    y: track.minY,
+                    width: track.width * CGFloat(percent / 100),
+                    height: track.height
+                )).fill()
+                NSGraphicsContext.restoreGraphicsState()
+            }
+
+            let valueRect = NSRect(x: track.maxX + 6, y: track.midY - 5, width: valueWidth, height: 10)
+            drawText(
+                String(format: "%.0f%%", percent),
+                rect: valueRect,
+                font: valueFont,
+                color: NSColor(hex: 0x0F172A).withAlphaComponent(alpha),
+                alignment: .right
+            )
+            y += lineHeight
+        }
+    }
+
+    private func cacheRateColor(index: Int) -> NSColor {
+        let palette = [
+            NSColor(hex: 0x0D9F6E),
+            NSColor(hex: 0x1A56DB),
+            NSColor(hex: 0x7C3AED),
+            NSColor(hex: 0xEA580C),
+            NSColor(hex: 0x0891B2),
+            NSColor(hex: 0xD97706)
+        ]
+        return palette[index % palette.count]
     }
 
     private func drawStatIcon(_ icon: StatIcon, in rect: NSRect, tint: NSColor, alpha: CGFloat) {
@@ -729,6 +1233,30 @@ final class UsageWidgetView: NSView {
             path.line(to: NSPoint(x: rect.minX + 6.4, y: rect.maxY - 3.0))
             path.lineWidth = 1.35
             path.stroke()
+        case .tokens:
+            let chip = NSBezierPath(roundedRect: rect.insetBy(dx: 2.0, dy: 2.0), xRadius: 2.6, yRadius: 2.6)
+            chip.lineWidth = 1.25
+            chip.stroke()
+
+            let pins = NSBezierPath()
+            let pinYs = [rect.minY + rect.height * 0.36, rect.minY + rect.height * 0.64]
+            for y in pinYs {
+                pins.move(to: NSPoint(x: rect.minX + 0.9, y: y))
+                pins.line(to: NSPoint(x: rect.minX + 2.6, y: y))
+                pins.move(to: NSPoint(x: rect.maxX - 2.6, y: y))
+                pins.line(to: NSPoint(x: rect.maxX - 0.9, y: y))
+            }
+            pins.lineWidth = 1.0
+            pins.stroke()
+
+            let tokenMark = NSBezierPath()
+            tokenMark.move(to: NSPoint(x: rect.minX + rect.width * 0.32, y: rect.minY + rect.height * 0.38))
+            tokenMark.line(to: NSPoint(x: rect.maxX - rect.width * 0.32, y: rect.minY + rect.height * 0.38))
+            tokenMark.move(to: NSPoint(x: rect.midX, y: rect.minY + rect.height * 0.38))
+            tokenMark.line(to: NSPoint(x: rect.midX, y: rect.maxY - rect.height * 0.30))
+            tokenMark.lineWidth = 1.35
+            tokenMark.lineCapStyle = .round
+            tokenMark.stroke()
         case .cache:
             let top = NSBezierPath()
             top.move(to: NSPoint(x: rect.midX, y: rect.minY + 1.2))
@@ -768,7 +1296,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func drawSubscriptionCards(in rect: NSRect, alpha: CGFloat) {
-        let listTop = rect.minY + panelListTopOffset
+        let listTop = rect.minY + panelListTopOffset()
         let titleY = listTop - 26
         drawText(
             "生效套餐",
@@ -1073,17 +1601,6 @@ final class UsageWidgetView: NSView {
         .systemFont(ofSize: 14, weight: .medium)
     }
 
-    private func cacheSummaryText() -> String {
-        guard snapshot.cacheRates.isEmpty == false else {
-            return "--"
-        }
-        if snapshot.cacheRates.count == 1 {
-            return String(format: "%.0f%%", snapshot.cacheRates[0].percent)
-        }
-        let average = snapshot.cacheRates.reduce(0) { $0 + $1.percent } / Double(snapshot.cacheRates.count)
-        return String(format: "%.0f%%", average)
-    }
-
     private func remainingText(until date: Date?, wrapped: Bool = true) -> String {
         guard let date else {
             return wrapped ? "(剩余--)" : "剩余--"
@@ -1134,7 +1651,7 @@ final class UsageWidgetView: NSView {
             cardStackHeight = snapshot.subscriptions.map(subscriptionCardHeight).reduce(0, +)
                 + CGFloat(max(0, snapshot.subscriptions.count - 1)) * panelCardGap
         }
-        return max(212, panelListTopOffset + cardStackHeight + panelBottomPadding)
+        return max(212, panelListTopOffset() + cardStackHeight + panelBottomPadding)
     }
 
     private func subscriptionCardHeight(_ item: SubscriptionDisplayItem) -> CGFloat {
@@ -1145,8 +1662,24 @@ final class UsageWidgetView: NSView {
         min(preferredPanelHeight(), max(180, bounds.height - 12))
     }
 
+    private func panelListTopOffset() -> CGFloat {
+        panelContentInset + statsSectionHeight() + 36
+    }
+
+    private func statsSectionHeight() -> CGFloat {
+        statsHeaderHeight + statsCardHeight() + 16
+    }
+
+    private func statsCardHeight() -> CGFloat {
+        let channelCount = max(1, snapshot.cacheRates.count)
+        if channelCount == 1 {
+            return 86
+        }
+        return min(168, max(96, 64 + CGFloat(channelCount) * 14))
+    }
+
     private func preferredPanelWidth(maxWidth: CGFloat? = nil) -> CGFloat {
-        let calculatedWidth = max(panelMinWidth, preferredSubscriptionContentWidth())
+        let calculatedWidth = max(panelMinWidth, preferredSubscriptionContentWidth(), preferredStatsContentWidth())
         let availableWidth = maxWidth.map { max(panelMinWidth, $0) } ?? panelMaxWidth
         return min(calculatedWidth, min(panelMaxWidth, availableWidth))
     }
@@ -1175,6 +1708,49 @@ final class UsageWidgetView: NSView {
         return maxRowWidth + panelContentInset * 2 + 32
     }
 
+    private func preferredStatsContentWidth() -> CGFloat {
+        let titleFont = sectionTitleFont()
+        let rangeFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.2, weight: .bold)
+        let rangeWidth = statsRangeButtonsWidth(font: rangeFont)
+        let refreshFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let refreshWidth = measuredWidth("刷新时间：00:00:00", font: refreshFont) + 6
+        let headerWidth = measuredWidth("使用统计", font: titleFont) + 14 + refreshWidth + 12 + rangeWidth
+
+        let inlineValues = [
+            ("花费", Formatters.usd(snapshot.todayCost)),
+            ("请求数", Formatters.integer(snapshot.requestCount)),
+            ("Tokens", Formatters.compactInteger(snapshot.totalTokens))
+        ]
+        let inlineCardWidth = inlineValues.reduce(CGFloat(132)) { width, item in
+            let titleWidth = measuredWidth(item.0, font: .systemFont(ofSize: 11, weight: .medium))
+            let valueWidth = measuredWidth(item.1, font: valueFont)
+            return max(width, titleWidth + valueWidth + 64)
+        }
+        let centeredCardWidth = max(
+            CGFloat(112),
+            measuredWidth("钱包余额", font: .systemFont(ofSize: 11, weight: .medium)) + 46,
+            measuredWidth(Formatters.usd(snapshot.walletBalance), font: .monospacedDigitSystemFont(ofSize: 16.2, weight: .semibold)) + 20
+        )
+        let cardsWidth = inlineCardWidth * 3 + centeredCardWidth * 2 + 8 * 4
+        return max(headerWidth, cardsWidth) + panelContentInset * 2
+    }
+
+    private func statsRangeButtonWidths(font: NSFont = .systemFont(ofSize: 10.5, weight: .semibold)) -> [CGFloat] {
+        StatsRange.allCases.map { max(36, measuredWidth($0.title, font: font) + 18) }
+    }
+
+    private func statsRangeButtonsWidth(
+        font: NSFont = .systemFont(ofSize: 10.5, weight: .semibold),
+        gap: CGFloat = 4
+    ) -> CGFloat {
+        statsRangeButtonsWidth(widths: statsRangeButtonWidths(font: font), gap: gap)
+    }
+
+    private func statsRangeButtonsWidth(widths: [CGFloat], gap: CGFloat) -> CGFloat {
+        widths.reduce(0, +) + gap * CGFloat(max(0, widths.count - 1))
+    }
+
     private func angledPanelPath(_ rect: NSRect) -> NSBezierPath {
         let radius: CGFloat = 16
         return NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
@@ -1197,6 +1773,25 @@ final class UsageWidgetView: NSView {
             size -= 0.5
         }
         return .monospacedDigitSystemFont(ofSize: minSize, weight: weight)
+    }
+
+    private func fittedSystemFont(
+        text: String,
+        maxSize: CGFloat,
+        minSize: CGFloat,
+        width: CGFloat,
+        weight: NSFont.Weight = .regular
+    ) -> NSFont {
+        var size = maxSize
+        while size > minSize {
+            let font = NSFont.systemFont(ofSize: size, weight: weight)
+            let measured = (text as NSString).size(withAttributes: [.font: font]).width
+            if measured <= width {
+                return font
+            }
+            size -= 0.4
+        }
+        return .systemFont(ofSize: minSize, weight: weight)
     }
 
     private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {

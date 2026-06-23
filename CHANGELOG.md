@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.4 - 2026-06-23
+
+- Added multi-range usage statistics for quota week, subscription period, today, last 7 days, and last 30 days.
+- Added Tokens to the statistics cards, with compact value formatting and sparklines for spend, requests, and Tokens.
+- Redesigned cache-rate display as compact per-channel progress bars.
+- Changed automatic refresh scheduling so the next interval starts after the previous refresh finishes.
+- Added explicit API timeouts and an ephemeral no-cache URLSession for lower network memory overhead.
+- Reduced memory growth when switching statistic ranges by canceling stale refreshes, sampling trend data during JSON decoding, and clearing hidden panel snapshots.
+- Refreshed README screenshots for the expanded panel, floating overview, and edge-bar overview.
+
 ## v0.2.3 - 2026-06-21
 
 - Added the edge quota bar mode: the floating ball can snap to a slim vertical or horizontal quota bar near screen edges, enabled by default and configurable from the menu bar.
@@ -10,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - Improved long-running memory stability by canceling refresh tasks on stop, releasing hidden panel windows, canceling pending hover-collapse work, and removing window observers when hidden.
 - Cached the Keychain token after first successful load and stored it with `kSecAttrAccessibleAfterFirstUnlock` to reduce repeated password prompts in normal use.
 - Updated active subscription display details, compact time labels, weekly/total quota rendering, and current quota calculation rules.
-- Refreshed README screenshots for menu actions, vertical/horizontal edge quota bars, and CPU usage in edge-bar and floating-ball modes.
+- Refreshed README screenshots for the expanded panel, floating overview, edge-bar overview, and CPU usage in edge-bar and floating-ball modes.
 - Updated Chinese and English documentation for the new edge quota bar behavior and v0.2.3 release asset.
 
 ## v0.2.2 - 2026-06-18

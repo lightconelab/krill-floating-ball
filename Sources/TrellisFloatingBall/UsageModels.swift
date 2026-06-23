@@ -6,6 +6,43 @@ struct CacheRate: Equatable {
     let percent: Double
 }
 
+enum StatsRange: String, CaseIterable, Equatable {
+    case quotaWeek
+    case subscriptionPeriod
+    case today
+    case last7Days
+    case last30Days
+
+    var title: String {
+        switch self {
+        case .quotaWeek:
+            return "额度周"
+        case .subscriptionPeriod:
+            return "套餐期"
+        case .today:
+            return "今日"
+        case .last7Days:
+            return "7日"
+        case .last30Days:
+            return "30日"
+        }
+    }
+}
+
+struct StatsRangeContext: Equatable {
+    let requested: StatsRange
+    let effective: StatsRange
+    let start: Date
+    let end: Date
+    let availableRanges: [StatsRange]
+}
+
+struct UsageTrendPoint: Equatable {
+    let cost: Double?
+    let requestCount: Int?
+    let tokens: Int?
+}
+
 struct SubscriptionDisplayItem: Equatable {
     let name: String
     let start: Date?
@@ -43,6 +80,10 @@ struct UsageSnapshot: Equatable {
     var todayCost: Double?
     var walletBalance: Double?
     var requestCount: Int?
+    var totalTokens: Int?
+    var trend: [UsageTrendPoint]
+    var statsRange: StatsRange
+    var availableStatsRanges: [StatsRange]
     var cacheRates: [CacheRate]
     var subscriptions: [SubscriptionDisplayItem]
 
@@ -74,6 +115,10 @@ struct UsageSnapshot: Equatable {
         todayCost: nil,
         walletBalance: nil,
         requestCount: nil,
+        totalTokens: nil,
+        trend: [],
+        statsRange: .today,
+        availableStatsRanges: [.today, .last7Days, .last30Days],
         cacheRates: [],
         subscriptions: [],
         lastRefresh: nil,
@@ -198,6 +243,41 @@ enum Formatters {
             return "N/A"
         }
         return String(format: "%.2f%%", max(0, min(100, value)))
+    }
+
+    static func compactInteger(_ value: Int?) -> String {
+        guard let value else {
+            return "--"
+        }
+
+        let sign = value < 0 ? "-" : ""
+        let absolute = Double(abs(value))
+        let units: [(trigger: Double, divisor: Double, suffix: String)] = [
+            (999_500_000_000, 1_000_000_000_000, "T"),
+            (999_500_000, 1_000_000_000, "B"),
+            (999_500, 1_000_000, "M"),
+            (1_000, 1_000, "K")
+        ]
+
+        guard let unit = units.first(where: { absolute >= $0.trigger }) else {
+            return "\(value)"
+        }
+
+        let scaled = absolute / unit.divisor
+        let number: String
+        if scaled >= 10 {
+            number = String(format: "%.0f", scaled)
+        } else {
+            number = String(format: "%.1f", scaled).replacingOccurrences(of: ".0", with: "")
+        }
+        return "\(sign)\(number)\(unit.suffix)"
+    }
+
+    static func integer(_ value: Int?) -> String {
+        guard let value else {
+            return "--"
+        }
+        return "\(value)"
     }
 
     static func date(_ value: Date?) -> String {

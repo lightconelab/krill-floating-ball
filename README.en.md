@@ -16,9 +16,9 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 | --- | --- | --- |
 | <img src="docs/images/floating-overview.png" width="420" alt="Floating overview"> | <img src="docs/images/expanded-panel.png" width="360" alt="Expanded panel"> | <img src="docs/images/floating-ball.png" width="120" alt="Floating ball"> |
 
-| Edge Quota Bar (Vertical) | Edge Quota Bar (Horizontal) |
+| Edge Bar with Expanded Panel | Edge Quota Bar (Horizontal) |
 | --- | --- |
-| <img src="docs/images/edge-progress-vertical.png" width="420" alt="Vertical edge quota bar"> | <img src="docs/images/edge-progress-horizontal.png" width="420" alt="Horizontal edge quota bar"> |
+| <img src="docs/images/edge-progress-vertical.png" width="420" alt="Edge bar with expanded panel"> | <img src="docs/images/edge-progress-horizontal.png" width="420" alt="Horizontal edge quota bar"> |
 
 | Missing Token State | Token Prompt |
 | --- | --- |
@@ -43,8 +43,9 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 - Automatically snaps to a slim edge quota bar near screen edges by default, with a menu toggle to disable it.
 - Low-overhead rendering: the floating animation runs only when needed, and the hover panel window is released after collapse.
 - Liquid quota indicator: the fill level follows weekly remaining quota, with stronger colors and pulse effects at low quota.
-- Hover panel showing today's spend, request count, cache rate, wallet balance, refresh time, and all active subscriptions, making it easy to compare against the Krill account center.
-- Configurable auto-refresh interval from the menu bar. The default interval is 30 seconds.
+- Hover panel showing usage statistics, wallet balance, refresh time, and all active subscriptions, making it easy to compare against the Krill account center.
+- Usage statistics support quota week, subscription period, today, 7-day, and 30-day ranges. Spend, requests, and Tokens include sparklines, while cache rates are shown per channel.
+- Configurable auto-refresh interval from the menu bar. The default interval is 30 seconds, and the next automatic refresh is scheduled after the previous refresh finishes.
 - Manual refresh, token setup, token clearing, launch-at-login toggle, and quit actions are available from the menu bar.
 - Failed refreshes keep the previous successful data and do not overwrite the last successful refresh time.
 - Krill API token is stored in macOS Keychain, not in source files or local config files.
@@ -59,7 +60,7 @@ Krill Floating Ball is a low-overhead native macOS floating widget for checking 
 ## Install From Release
 
 1. Download the latest zip from [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
-2. Unzip `Krill-Floating-Ball-v0.2.3-macOS-arm64.zip`.
+2. Unzip `Krill-Floating-Ball-v0.2.4-macOS-arm64.zip`.
 3. Open `Krill Floating Ball.app`.
 4. On first launch, set your Krill API token from the prompt or from the menu bar item `设置 Krill Token...`.
 
@@ -87,7 +88,7 @@ The packaged app will be written to `dist/`.
 1. Launch `Krill Floating Ball.app`.
 2. Enter your Krill API token when prompted, or choose `设置 Krill Token...` from the menu bar.
 3. Drag the floating ball to your preferred position.
-4. Hover over the ball to inspect today's usage, wallet balance, and active subscriptions.
+4. Hover over the ball to inspect usage statistics, wallet balance, and active subscriptions.
 5. Use the menu bar to refresh manually, change the auto-refresh interval, enable or disable launch at login, clear the token, or quit the app.
 
 ## Data Scope
@@ -97,7 +98,7 @@ The packaged app will be written to `dist/`.
 - The liquid color alert level is based on the remaining percentage of that weekly availability pool.
 - When `plan.billing_type = usd_monthly`, the subscription total quota is `quota.daily_limit_usd`, and it is not counted as weekly quota.
 - When `plan.billing_type = usd_weekly`, weekly quota is `quota.daily_limit_usd`, and the subscription total quota is `quota.daily_limit_usd * 4`.
-- Today's statistics are requested from the local day's `00:00:00` to the current time, using the user's current time zone.
+- Usage statistics can be requested for quota week, subscription period, today, the last 7 days, and the last 30 days. The today range uses the user's local `00:00:00` to the current time.
 - If an API refresh fails, the app waits for the next scheduled refresh or manual refresh and keeps the last successful refresh timestamp unchanged.
 
 ## Privacy

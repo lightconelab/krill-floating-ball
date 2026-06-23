@@ -7,16 +7,7 @@ enum UsageAggregator {
             throw KrillAPIError.missingData
         }
 
-        let activeSubscriptions = subscriptionData.subscriptions.filter { item in
-            guard item.plan?.active == true,
-                  let start = APIDateParser.parse(item.subscriptionStartAt),
-                  let end = APIDateParser.parse(item.subscriptionEndAt)
-            else {
-                return false
-            }
-
-            return start <= now && now < end
-        }
+        let activeSubscriptions = activeSubscriptions(in: bundle.subscription, now: now)
 
         let subscriptionDisplays = activeSubscriptions.map { item in
             let start = APIDateParser.parse(item.subscriptionStartAt)
@@ -119,6 +110,13 @@ enum UsageAggregator {
         }
 
         let walletBalance = decimal(subscriptionData.creditBalanceUsd) + decimal(subscriptionData.welfareBalanceUsd)
+        let trend = downsample(stats?.trend ?? [], maxCount: 64).map { point in
+            UsageTrendPoint(
+                cost: point.totalCostUsd.map(decimal),
+                requestCount: point.requestCount,
+                tokens: point.totalTokens
+            )
+        }
 
         return UsageSnapshot(
             weeklyRemaining: weeklyTotal > 0 ? weeklyRemaining : nil,
@@ -135,6 +133,10 @@ enum UsageAggregator {
             todayCost: decimal(stats?.totalCostUsd),
             walletBalance: walletBalance,
             requestCount: stats?.totalRequests,
+            totalTokens: stats?.totalTokens,
+            trend: trend,
+            statsRange: bundle.statsRangeContext.effective,
+            availableStatsRanges: bundle.statsRangeContext.availableRanges,
             cacheRates: cacheRates,
             subscriptions: subscriptionDisplays,
             lastRefresh: now,
@@ -145,7 +147,89 @@ enum UsageAggregator {
         )
     }
 
-    private static func weeklyLimit(_ item: SubscriptionItem) -> Double? {
+    private static func downsample<T>(_ items: [T], maxCount: Int) -> [T] {
+        guard items.count > maxCount, maxCount > 1 else {
+            return items
+        }
+
+        let step = Double(items.count - 1) / Double(maxCount - 1)
+        return (0..<maxCount).map { index in
+            let sourceIndex = min(items.count - 1, Int((Double(index) * step).rounded()))
+            return items[sourceIndex]
+        }
+    }
+
+    static func statsRangeContext(
+        subscription: SubscriptionEnvelope,
+        requested: StatsRange,
+        now: Date
+    ) throws -> StatsRangeContext {
+        let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
+        let weeklyQuotaSubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
+        let weekStarts = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
+        let weekEnds = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let monthlySubscriptions = activeSubscriptions.filter { weeklyLimit($0) == nil && totalLimit($0) != nil }
+        let subscriptionStarts = monthlySubscriptions.compactMap { APIDateParser.parse($0.subscriptionStartAt) }
+        let subscriptionEnds = monthlySubscriptions.compactMap { APIDateParser.parse($0.subscriptionEndAt) }
+
+        var available: [StatsRange] = [.today, .last7Days, .last30Days]
+        let weekStart = weekStarts.min()
+        let weekEnd = weekEnds.max()
+        if weekStart != nil, weekEnd != nil {
+            available.insert(.quotaWeek, at: 0)
+        }
+
+        let subscriptionStart = subscriptionStarts.min()
+        let subscriptionEnd = subscriptionEnds.max()
+        if subscriptionStart != nil, subscriptionEnd != nil {
+            let insertionIndex = available.contains(.quotaWeek) ? 1 : 0
+            available.insert(.subscriptionPeriod, at: insertionIndex)
+        }
+
+        let effective = available.contains(requested) ? requested : .today
+        let calendar = Calendar.current
+        let start: Date
+
+        switch effective {
+        case .quotaWeek:
+            start = weekStart ?? calendar.startOfDay(for: now)
+        case .subscriptionPeriod:
+            start = subscriptionStart ?? calendar.startOfDay(for: now)
+        case .today:
+            start = calendar.startOfDay(for: now)
+        case .last7Days:
+            start = calendar.date(byAdding: .day, value: -7, to: now) ?? now.addingTimeInterval(-7 * 86_400)
+        case .last30Days:
+            start = calendar.date(byAdding: .day, value: -30, to: now) ?? now.addingTimeInterval(-30 * 86_400)
+        }
+
+        return StatsRangeContext(
+            requested: requested,
+            effective: effective,
+            start: min(start, now),
+            end: now,
+            availableRanges: available
+        )
+    }
+
+    static func activeSubscriptions(in envelope: SubscriptionEnvelope, now: Date) -> [SubscriptionItem] {
+        guard let subscriptionData = envelope.data else {
+            return []
+        }
+
+        return subscriptionData.subscriptions.filter { item in
+            guard item.plan?.active == true,
+                  let start = APIDateParser.parse(item.subscriptionStartAt),
+                  let end = APIDateParser.parse(item.subscriptionEndAt)
+            else {
+                return false
+            }
+
+            return start <= now && now < end
+        }
+    }
+
+    static func weeklyLimit(_ item: SubscriptionItem) -> Double? {
         let billing = billingType(item)
         let dailyLimit = decimal(item.quota?.dailyLimitUsd)
 
@@ -161,7 +245,7 @@ enum UsageAggregator {
         return legacyLimit > 0 ? legacyLimit : nil
     }
 
-    private static func totalLimit(_ item: SubscriptionItem) -> Double? {
+    static func totalLimit(_ item: SubscriptionItem) -> Double? {
         let billing = billingType(item)
         let dailyLimit = decimal(item.quota?.dailyLimitUsd)
 

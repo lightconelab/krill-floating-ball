@@ -43,6 +43,8 @@ final class FloatingBallController {
         static let attachThreshold: CGFloat = 24
         static let minimumVisibleLength: CGFloat = 28
         static let sharedEdgeTolerance: CGFloat = 2
+        static let edgeHoverPadding: CGFloat = 14
+        static let panelBridgePadding: CGFloat = 10
     }
 
     private let store: UsageStore
@@ -57,6 +59,7 @@ final class FloatingBallController {
     private var attachedEdge: ScreenEdge?
     private var dragStartFrame: NSRect?
     private var isApplyingFrame = false
+    private var latestSnapshot = UsageSnapshot.placeholder
 
     init(store: UsageStore) {
         self.store = store
@@ -80,6 +83,9 @@ final class FloatingBallController {
         }
         panelView.expansionChanged = { [weak self] expanded in
             self?.setExpanded(expanded)
+        }
+        panelView.statsRangeChanged = { [weak store] range in
+            store?.setStatsRange(range)
         }
     }
 
@@ -112,9 +118,10 @@ final class FloatingBallController {
     }
 
     func update(snapshot: UsageSnapshot) {
+        latestSnapshot = snapshot
         ballView.snapshot = snapshot
-        panelView.snapshot = snapshot
         if isExpanded, panelWindow?.isVisible == true {
+            panelView.snapshot = snapshot
             positionPanel(animated: false)
         }
     }
@@ -261,6 +268,7 @@ final class FloatingBallController {
     }
 
     private func showPanel() {
+        panelView.snapshot = latestSnapshot
         let targetFrame = targetPanelFrame()
         let startFrame = pixelAligned(targetFrame.offsetBy(dx: panelSlideOffset(for: targetFrame), dy: 0), on: window.screen)
         let panelWindow = ensurePanelWindow()
@@ -311,6 +319,7 @@ final class FloatingBallController {
         panelWindow?.alphaValue = 1
         panelWindow?.contentView = nil
         panelWindow = nil
+        panelView.snapshot = .placeholder
     }
 
     private func positionPanel(animated: Bool) {
@@ -318,7 +327,13 @@ final class FloatingBallController {
             return
         }
         let frame = targetPanelFrame()
-        panelView.frame = NSRect(origin: .zero, size: frame.size)
+        let panelContentFrame = NSRect(origin: .zero, size: frame.size)
+        if framesAreEqual(panelView.frame, panelContentFrame) == false {
+            panelView.frame = panelContentFrame
+        }
+        guard framesAreEqual(panelWindow.frame, frame) == false else {
+            return
+        }
         if animated {
             panelWindow.animator().setFrame(frame, display: true)
         } else {
@@ -376,7 +391,9 @@ final class FloatingBallController {
     }
 
     private func pointerIsInsideWindows() -> Bool {
-        pointerIsInside(window) || panelWindow.map(pointerIsInside) == true
+        pointerIsInside(window)
+            || panelWindow.map(pointerIsInside) == true
+            || pointerIsInsidePanelBridge()
     }
 
     private func pointerIsInside(_ panel: NSPanel) -> Bool {
@@ -384,7 +401,26 @@ final class FloatingBallController {
             return false
         }
         let point = contentView.convert(panel.mouseLocationOutsideOfEventStream, from: nil)
-        return contentView.bounds.insetBy(dx: -2, dy: -2).contains(point)
+        let margin = panel === window && ballView.ballPresentation == .edgeProgressBar
+            ? Layout.edgeHoverPadding
+            : 2
+        return contentView.bounds.insetBy(dx: -margin, dy: -margin).contains(point)
+    }
+
+    private func pointerIsInsidePanelBridge() -> Bool {
+        guard isExpanded,
+              let panelWindow,
+              panelWindow.isVisible
+        else {
+            return false
+        }
+
+        let point = NSEvent.mouseLocation
+        let bridge = window.frame.union(panelWindow.frame).insetBy(
+            dx: -Layout.panelBridgePadding,
+            dy: -Layout.panelBridgePadding
+        )
+        return bridge.contains(point)
     }
 
     private func applyEdgePolicy(animated: Bool, preserveAttachedEdge: Bool) {
@@ -425,7 +461,10 @@ final class FloatingBallController {
     ) {
         let targetFrame = pixelAligned(frame, on: screen)
         ballView.ballPresentation = presentation
-        ballView.frame = NSRect(origin: .zero, size: targetFrame.size)
+        let ballContentFrame = NSRect(origin: .zero, size: targetFrame.size)
+        if framesAreEqual(ballView.frame, ballContentFrame) == false {
+            ballView.frame = ballContentFrame
+        }
 
         guard framesAreEqual(window.frame, targetFrame) == false else {
             positionPanel(animated: false)
