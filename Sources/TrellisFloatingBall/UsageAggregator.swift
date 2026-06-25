@@ -3,11 +3,54 @@ import Foundation
 @MainActor
 enum UsageAggregator {
     static func makeSnapshot(bundle: APIBundle, now: Date = Date()) throws -> UsageSnapshot {
-        guard let subscriptionData = bundle.subscription.data else {
+        try makeSnapshot(
+            subscription: bundle.subscription,
+            stats: bundle.stats,
+            statsRangeContext: bundle.statsRangeContext,
+            previous: nil,
+            now: now,
+            lastRefresh: now,
+            isLoading: false,
+            isStale: false,
+            lastError: nil
+        )
+    }
+
+    static func makeSubscriptionSnapshot(
+        subscription: SubscriptionEnvelope,
+        statsRangeContext: StatsRangeContext,
+        previous: UsageSnapshot,
+        now: Date = Date()
+    ) throws -> UsageSnapshot {
+        try makeSnapshot(
+            subscription: subscription,
+            stats: nil,
+            statsRangeContext: statsRangeContext,
+            previous: previous,
+            now: now,
+            lastRefresh: previous.lastRefresh,
+            isLoading: true,
+            isStale: previous.lastRefresh != nil,
+            lastError: nil
+        )
+    }
+
+    private static func makeSnapshot(
+        subscription: SubscriptionEnvelope,
+        stats: StatsEnvelope?,
+        statsRangeContext: StatsRangeContext,
+        previous: UsageSnapshot?,
+        now: Date,
+        lastRefresh: Date?,
+        isLoading: Bool,
+        isStale: Bool,
+        lastError: String?
+    ) throws -> UsageSnapshot {
+        guard let subscriptionData = subscription.data else {
             throw KrillAPIError.missingData
         }
 
-        let activeSubscriptions = activeSubscriptions(in: bundle.subscription, now: now)
+        let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
 
         let subscriptionDisplays = activeSubscriptions.map { item in
             let start = APIDateParser.parse(item.subscriptionStartAt)
@@ -59,7 +102,7 @@ enum UsageAggregator {
             else {
                 return false
             }
-            return subscription(item, overlapsWindowStart: weekWindowStart, windowEnd: weekWindowEnd)
+            return subscriptionOverlaps(item, windowStart: weekWindowStart, windowEnd: weekWindowEnd)
         }
 
         let weeklyTotal = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
@@ -101,22 +144,31 @@ enum UsageAggregator {
             max(0, Int(ceil(end.timeIntervalSince(now) / 86_400)))
         }
 
-        let stats = bundle.stats.data
-        let cacheRates = (stats?.channelCacheRates ?? []).map { rate in
-            CacheRate(
-                name: rate.channelName ?? "未知渠道",
-                percent: max(0, min(100, (rate.cacheRate ?? 0) * 100))
-            )
-        }
+        let statsPayload = stats?.data
+        let shouldReusePreviousStats = statsPayload == nil && previous?.statsRange == statsRangeContext.effective
+        let previousSnapshot = shouldReusePreviousStats ? previous : nil
+        let cacheRates = statsPayload.map { payload in
+            (payload.channelCacheRates ?? []).map { rate in
+                CacheRate(
+                    name: rate.channelName ?? "未知渠道",
+                    percent: max(0, min(100, (rate.cacheRate ?? 0) * 100))
+                )
+            }
+        } ?? previousSnapshot?.cacheRates ?? []
 
         let walletBalance = decimal(subscriptionData.creditBalanceUsd) + decimal(subscriptionData.welfareBalanceUsd)
-        let trend = downsample(stats?.trend ?? [], maxCount: 64).map { point in
-            UsageTrendPoint(
-                cost: point.totalCostUsd.map(decimal),
-                requestCount: point.requestCount,
-                tokens: point.totalTokens
-            )
-        }
+        let trend = statsPayload.map { payload in
+            downsample(payload.trend ?? [], maxCount: 32).map { point in
+                UsageTrendPoint(
+                    cost: point.totalCostUsd.map(decimal),
+                    requestCount: point.requestCount,
+                    tokens: point.totalTokens
+                )
+            }
+        } ?? previousSnapshot?.trend ?? []
+        let cost = statsPayload.map { decimal($0.totalCostUsd) } ?? previousSnapshot?.todayCost
+        let requests = statsPayload?.totalRequests ?? previousSnapshot?.requestCount
+        let tokens = statsPayload?.totalTokens ?? previousSnapshot?.totalTokens
 
         return UsageSnapshot(
             weeklyRemaining: weeklyTotal > 0 ? weeklyRemaining : nil,
@@ -130,20 +182,20 @@ enum UsageAggregator {
             monthlyPercent: monthlyPercent,
             expiry: maxEnd,
             remainingDays: remainingDays,
-            todayCost: decimal(stats?.totalCostUsd),
+            todayCost: cost,
             walletBalance: walletBalance,
-            requestCount: stats?.totalRequests,
-            totalTokens: stats?.totalTokens,
+            requestCount: requests,
+            totalTokens: tokens,
             trend: trend,
-            statsRange: bundle.statsRangeContext.effective,
-            availableStatsRanges: bundle.statsRangeContext.availableRanges,
+            statsRange: statsRangeContext.effective,
+            availableStatsRanges: statsRangeContext.availableRanges,
             cacheRates: cacheRates,
             subscriptions: subscriptionDisplays,
-            lastRefresh: now,
-            isLoading: false,
-            isStale: false,
+            lastRefresh: lastRefresh,
+            isLoading: isLoading,
+            isStale: isStale,
             needsToken: false,
-            lastError: nil
+            lastError: lastError
         )
     }
 
@@ -169,8 +221,9 @@ enum UsageAggregator {
         let weekStarts = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
         let weekEnds = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
         let monthlySubscriptions = activeSubscriptions.filter { weeklyLimit($0) == nil && totalLimit($0) != nil }
-        let subscriptionStarts = monthlySubscriptions.compactMap { APIDateParser.parse($0.subscriptionStartAt) }
-        let subscriptionEnds = monthlySubscriptions.compactMap { APIDateParser.parse($0.subscriptionEndAt) }
+        let monthlyWindows = monthlySubscriptions.compactMap { currentMonthlyStatsWindow(for: $0, now: now) }
+        let subscriptionStarts = monthlyWindows.map(\.start)
+        let subscriptionEnds = monthlyWindows.map(\.end)
 
         var available: [StatsRange] = [.today, .last7Days, .last30Days]
         let weekStart = weekStarts.min()
@@ -292,9 +345,9 @@ enum UsageAggregator {
         return duration >= 30 || billing.contains("month")
     }
 
-    private static func subscription(
+    private static func subscriptionOverlaps(
         _ item: SubscriptionItem,
-        overlapsWindowStart windowStart: Date,
+        windowStart: Date,
         windowEnd: Date
     ) -> Bool {
         guard let start = APIDateParser.parse(item.subscriptionStartAt),
@@ -303,6 +356,23 @@ enum UsageAggregator {
             return false
         }
         return start < windowEnd && windowStart < end
+    }
+
+    private static func currentMonthlyStatsWindow(for item: SubscriptionItem, now: Date) -> (start: Date, end: Date)? {
+        guard let subscriptionStart = APIDateParser.parse(item.subscriptionStartAt),
+              let subscriptionEnd = APIDateParser.parse(item.subscriptionEndAt),
+              subscriptionStart <= now,
+              now < subscriptionEnd
+        else {
+            return nil
+        }
+
+        let cycleLength: TimeInterval = 30 * 86_400
+        let elapsed = max(0, now.timeIntervalSince(subscriptionStart))
+        let cycleIndex = floor(elapsed / cycleLength)
+        let cycleStart = subscriptionStart.addingTimeInterval(cycleIndex * cycleLength)
+        let cycleEnd = min(subscriptionEnd, cycleStart.addingTimeInterval(cycleLength))
+        return (cycleStart, cycleEnd)
     }
 
     private static func billingType(_ item: SubscriptionItem) -> String {

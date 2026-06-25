@@ -3,8 +3,7 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keychain = KeychainStore(
-        service: "com.liguanqin.trellis-floating-ball",
-        account: "krill-api-token"
+        service: "com.liguanqin.trellis-floating-ball"
     )
 
     private lazy var usageStore = UsageStore(keychain: keychain)
@@ -14,8 +13,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var launchAtLoginMenuItem: NSMenuItem?
     private var edgeProgressMenuItem: NSMenuItem?
 
+    private enum CredentialsPromptContext {
+        case initialLaunch
+        case menuAction
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        setupMainMenu()
         setupStatusItem()
 
         usageStore.onSnapshotChange = { [weak self] snapshot in
@@ -23,12 +28,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.updateStatusTooltip(snapshot)
         }
 
-        floatingController.show()
+        let hasCredentials = keychain.loadCredentials() != nil
+        if hasCredentials {
+            floatingController.show()
+        }
         usageStore.start()
 
-        if keychain.loadToken() == nil {
+        if hasCredentials == false {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.promptForToken()
+                self?.promptForCredentials(context: .initialLaunch)
             }
         }
     }
@@ -58,8 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let edgeItem = NSMenuItem(title: "贴边进度条", action: #selector(toggleEdgeProgress), keyEquivalent: "")
         edgeProgressMenuItem = edgeItem
         menu.addItem(edgeItem)
-        menu.addItem(NSMenuItem(title: "设置 Krill Token...", action: #selector(setToken), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "清除 Token", action: #selector(clearToken), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "设置 Krill 账号...", action: #selector(setCredentials), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "清除登录信息", action: #selector(clearCredentials), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "显示悬浮球", action: #selector(showFloatingBall), keyEquivalent: "s"))
         menu.addItem(NSMenuItem(title: "隐藏悬浮球", action: #selector(hideFloatingBall), keyEquivalent: "h"))
@@ -72,6 +80,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.delegate = self
         item.menu = menu
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "退出 Krill Floating Ball", action: #selector(quit), keyEquivalent: "q"))
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(NSMenuItem(title: "撤销", action: Selector(("undo:")), keyEquivalent: "z"))
+        editMenu.addItem(NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "Z"))
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -143,13 +176,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateEdgeProgressMenuItem()
     }
 
-    @objc private func setToken() {
-        promptForToken()
+    @objc private func setCredentials() {
+        promptForCredentials(context: .menuAction)
     }
 
-    @objc private func clearToken() {
-        keychain.deleteToken()
-        usageStore.refresh(manual: true)
+    @objc private func clearCredentials() {
+        keychain.deleteCredentials()
+        usageStore.credentialsDidChangeAndRefreshNow()
     }
 
     @objc private func showFloatingBall() {
@@ -164,37 +197,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    private func promptForToken() {
+    private func promptForCredentials(context: CredentialsPromptContext) {
         NSApp.activate(ignoringOtherApps: true)
+        let shouldRestoreFloating = floatingController.temporarilyHideForModal()
 
+        let existing = keychain.loadCredentials()
         let alert = NSAlert()
-        alert.messageText = "设置 Krill API Token"
-        alert.informativeText = "请输入 krill-ai 的 Bearer Token。Token 会保存到 macOS Keychain，源码和配置文件不会保存该凭证。"
+        alert.messageText = "设置 Krill 登录账号"
+        alert.informativeText = "请输入 Krill AI 的邮箱和密码。凭据会保存到 macOS Keychain，源码和配置文件不会保存该信息。"
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "保存并刷新")
+        alert.addButton(withTitle: "登录并刷新")
         alert.addButton(withTitle: "取消")
 
-        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 24))
-        input.placeholderString = "Bearer eyJ... 或 eyJ..."
-        input.stringValue = keychain.loadToken() ?? ""
-        alert.accessoryView = input
+        let emailInput = ShortcutTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        emailInput.placeholderString = "邮箱"
+        emailInput.stringValue = existing?.email ?? ""
+        configureCredentialInput(emailInput)
+
+        let passwordInput = ShortcutSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        passwordInput.placeholderString = existing == nil ? "密码" : "留空则保留原密码"
+        configureCredentialInput(passwordInput)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.alignment = .leading
+        stack.addArrangedSubview(labeledField(title: "邮箱", field: emailInput))
+        stack.addArrangedSubview(labeledField(title: "密码", field: passwordInput))
+        stack.frame = NSRect(x: 0, y: 0, width: 420, height: 64)
+        alert.accessoryView = stack
+        alert.window.initialFirstResponder = existing?.email.isEmpty == false ? passwordInput : emailInput
 
         guard alert.runModal() == .alertFirstButtonReturn else {
+            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
             return
         }
 
-        let token = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard token.isEmpty == false else {
+        let email = emailInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = passwordInput.stringValue.isEmpty
+            ? (existing?.password ?? "")
+            : passwordInput.stringValue
+        guard email.isEmpty == false, password.isEmpty == false else {
+            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
             return
         }
 
         do {
-            try keychain.saveToken(token)
-            usageStore.refresh(manual: true)
+            try keychain.saveCredentials(KrillCredentials(email: email, password: password))
+            if shouldRestoreFloating {
+                floatingController.restoreAfterModalIfNeeded(true)
+            } else if context == .initialLaunch || existing == nil {
+                floatingController.show()
+            }
+            usageStore.credentialsDidChangeAndRefreshNow()
         } catch {
+            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
             let errorAlert = NSAlert(error: error)
-            errorAlert.messageText = "Token 保存失败"
+            errorAlert.messageText = "登录凭据保存失败"
             errorAlert.runModal()
+        }
+    }
+
+    private func labeledField(title: String, field: NSView) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.frame = NSRect(x: 0, y: 0, width: 44, height: 24)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(field)
+        row.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+        return row
+    }
+
+    private func configureCredentialInput(_ field: NSTextField) {
+        if #available(macOS 11.0, *) {
+            field.contentType = nil
+        }
+        field.isAutomaticTextCompletionEnabled = false
+        field.usesSingleLineMode = true
+        field.allowsEditingTextAttributes = false
+        field.importsGraphics = false
+        if #available(macOS 15.2, *) {
+            field.allowsWritingTools = false
+        }
+        if #available(macOS 15.4, *) {
+            field.allowsWritingToolsAffordance = false
         }
     }
 
@@ -291,4 +383,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image.accessibilityDescription = "Krill Floating Ball"
         return image
     }
+}
+
+private final class ShortcutTextField: NSTextField {
+    override func keyDown(with event: NSEvent) {
+        guard handleStandardEditingShortcut(event, field: self) == false else {
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+private final class ShortcutSecureTextField: NSSecureTextField {
+    override func keyDown(with event: NSEvent) {
+        guard handleStandardEditingShortcut(event, field: self) == false else {
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+@MainActor
+private func handleStandardEditingShortcut(_ event: NSEvent, field: NSTextField) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard flags.contains(.command) || flags.contains(.control),
+          flags.contains(.option) == false
+    else {
+        return false
+    }
+
+    let key = event.charactersIgnoringModifiers?.lowercased() ?? keyEquivalent(for: event.keyCode)
+    switch key {
+    case "v":
+        return performTextAction(#selector(NSText.paste(_:)), field: field)
+    case "c":
+        return performTextAction(#selector(NSText.copy(_:)), field: field)
+    case "x":
+        return performTextAction(#selector(NSText.cut(_:)), field: field)
+    case "a":
+        return performTextAction(#selector(NSText.selectAll(_:)), field: field)
+    case "z" where flags.contains(.shift):
+        return performTextAction(Selector(("redo:")), field: field)
+    case "z":
+        return performTextAction(Selector(("undo:")), field: field)
+    default:
+        return false
+    }
+}
+
+private func keyEquivalent(for keyCode: UInt16) -> String? {
+    switch keyCode {
+    case 0:
+        return "a"
+    case 6:
+        return "z"
+    case 7:
+        return "x"
+    case 8:
+        return "c"
+    case 9:
+        return "v"
+    default:
+        return nil
+    }
+}
+
+@MainActor
+private func performTextAction(_ action: Selector, field: NSTextField) -> Bool {
+    if NSApp.sendAction(action, to: nil, from: field) {
+        return true
+    }
+
+    guard let editor = field.currentEditor() else {
+        return false
+    }
+    editor.perform(action, with: field)
+    return true
 }

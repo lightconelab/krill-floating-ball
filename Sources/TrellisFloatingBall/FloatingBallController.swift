@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 enum EdgeProgressPreference {
     private static let defaultsKey = "edgeProgressEnabled"
@@ -49,8 +50,8 @@ final class FloatingBallController {
 
     private let store: UsageStore
     private let ballView: UsageWidgetView
-    private let panelView: UsageWidgetView
     private lazy var window: NSPanel = makeWindow(contentView: ballView, frame: defaultFrame())
+    private var panelView: UsageWidgetView?
     private var panelWindow: NSPanel?
     private var isExpanded = false
     private var moveObserver: NSObjectProtocol?
@@ -64,7 +65,6 @@ final class FloatingBallController {
     init(store: UsageStore) {
         self.store = store
         self.ballView = UsageWidgetView(frame: NSRect(origin: .zero, size: Layout.collapsedSize), displayMode: .ball)
-        self.panelView = UsageWidgetView(frame: NSRect(origin: .zero, size: NSSize(width: 500, height: 240)), displayMode: .panel)
 
         ballView.refreshAction = { [weak store] in
             store?.refresh(manual: true)
@@ -81,15 +81,10 @@ final class FloatingBallController {
         ballView.dragEndedAction = { [weak self] in
             self?.finishUserDrag()
         }
-        panelView.expansionChanged = { [weak self] expanded in
-            self?.setExpanded(expanded)
-        }
-        panelView.statsRangeChanged = { [weak store] range in
-            store?.setStatsRange(range)
-        }
     }
 
     func show() {
+        collapsePanel(animated: false)
         if window.isVisible == false {
             attachedEdge = nil
             let frame = defaultFrame()
@@ -106,13 +101,35 @@ final class FloatingBallController {
     }
 
     func hide() {
-        isExpanded = false
-        ballView.isExpanded = false
-        panelView.isExpanded = false
-        hidePanel(animated: false)
+        collapsePanel(animated: false)
         ballView.setAnimationActive(false)
         window.orderOut(nil)
         removeWindowObservers()
+    }
+
+    func temporarilyHideForModal() -> Bool {
+        let wasVisible = window.isVisible
+        collapsePanel(animated: false)
+        guard wasVisible else {
+            return false
+        }
+
+        ballView.setAnimationActive(false)
+        window.orderOut(nil)
+        removeWindowObservers()
+        return true
+    }
+
+    func restoreAfterModalIfNeeded(_ shouldRestore: Bool) {
+        guard shouldRestore else {
+            return
+        }
+
+        window.setFrame(pixelAligned(window.frame, on: window.screen), display: true)
+        window.orderFrontRegardless()
+        ballView.setAnimationActive(true)
+        installMoveObserverIfNeeded()
+        installScreenObserverIfNeeded()
     }
 
     func setEdgeProgressEnabled(_ enabled: Bool) {
@@ -124,7 +141,7 @@ final class FloatingBallController {
     func update(snapshot: UsageSnapshot) {
         latestSnapshot = snapshot
         ballView.snapshot = snapshot
-        if isExpanded, panelWindow?.isVisible == true {
+        if isExpanded, panelWindow?.isVisible == true, let panelView {
             panelView.snapshot = snapshot
             positionPanel(animated: false)
         }
@@ -141,7 +158,6 @@ final class FloatingBallController {
             }
             isExpanded = true
             ballView.isExpanded = true
-            panelView.isExpanded = true
             showPanel()
             return
         }
@@ -151,8 +167,15 @@ final class FloatingBallController {
         }
         isExpanded = false
         ballView.isExpanded = false
-        panelView.isExpanded = false
+        panelView?.isExpanded = false
         hidePanel(animated: true)
+    }
+
+    private func collapsePanel(animated: Bool) {
+        isExpanded = false
+        ballView.isExpanded = false
+        panelView?.isExpanded = false
+        hidePanel(animated: animated)
     }
 
     private func makeWindow(contentView: NSView, frame: NSRect) -> NSPanel {
@@ -237,10 +260,7 @@ final class FloatingBallController {
             return
         }
         if isExpanded {
-            isExpanded = false
-            ballView.isExpanded = false
-            panelView.isExpanded = false
-            hidePanel(animated: false)
+            collapsePanel(animated: false)
         }
 
         if ballView.ballPresentation != .sphere {
@@ -272,7 +292,9 @@ final class FloatingBallController {
     }
 
     private func showPanel() {
+        let panelView = ensurePanelView()
         panelView.snapshot = latestSnapshot
+        panelView.isExpanded = true
         let targetFrame = targetPanelFrame()
         let startFrame = pixelAligned(targetFrame.offsetBy(dx: panelSlideOffset(for: targetFrame), dy: 0), on: window.screen)
         let panelWindow = ensurePanelWindow()
@@ -328,11 +350,13 @@ final class FloatingBallController {
         panelWindow?.alphaValue = 1
         panelWindow?.contentView = nil
         panelWindow = nil
-        panelView.snapshot = .placeholder
+        panelView?.snapshot = .placeholder
+        panelView = nil
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     private func positionPanel(animated: Bool) {
-        guard let panelWindow, panelWindow.isVisible else {
+        guard let panelWindow, panelWindow.isVisible, let panelView else {
             return
         }
         let frame = targetPanelFrame()
@@ -352,6 +376,7 @@ final class FloatingBallController {
     }
 
     private func targetPanelFrame() -> NSRect {
+        let panelView = ensurePanelView()
         let screen = screenForFrame(window.frame)
         let visible = screen.visibleFrame
         let maxHeight = visible.height - 24
@@ -390,6 +415,7 @@ final class FloatingBallController {
     }
 
     private func defaultPanelFrame() -> NSRect {
+        let panelView = ensurePanelView()
         let size = panelView.preferredPanelSize(
             maxHeight: NSScreen.main.map { $0.visibleFrame.height - 24 },
             maxWidth: NSScreen.main.map { $0.visibleFrame.width - 24 }
@@ -401,9 +427,27 @@ final class FloatingBallController {
         if let panelWindow {
             return panelWindow
         }
+        let panelView = ensurePanelView()
         let panel = makeWindow(contentView: panelView, frame: defaultPanelFrame())
         panelWindow = panel
         return panel
+    }
+
+    private func ensurePanelView() -> UsageWidgetView {
+        if let panelView {
+            return panelView
+        }
+
+        let view = UsageWidgetView(frame: NSRect(origin: .zero, size: NSSize(width: 500, height: 240)), displayMode: .panel)
+        let store = self.store
+        view.expansionChanged = { [weak self] expanded in
+            self?.setExpanded(expanded)
+        }
+        view.statsRangeChanged = { [weak store] range in
+            store?.setStatsRange(range)
+        }
+        panelView = view
+        return view
     }
 
     private func keepBallWindowAbovePanel() {

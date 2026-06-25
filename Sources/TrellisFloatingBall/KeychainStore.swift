@@ -10,28 +10,88 @@ enum KeychainStoreError: LocalizedError {
         case .unexpectedStatus(let status):
             return "Keychain 操作失败，状态码：\(status)"
         case .invalidData:
-            return "Keychain 中的 Token 数据无效"
+            return "Keychain 中的登录凭据数据无效"
         }
     }
 }
 
+struct KrillCredentials: Codable, Equatable {
+    let email: String
+    let password: String
+}
+
 final class KeychainStore {
-    let service: String
-    let account: String
-
-    private var didLoadToken = false
-    private var cachedToken: String?
-
-    init(service: String, account: String) {
-        self.service = service
-        self.account = account
+    private enum Accounts {
+        static let credentials = "krill-login-credentials"
+        static let legacyToken = "krill-api-token"
     }
 
-    func loadToken() -> String? {
-        if didLoadToken {
-            return cachedToken
+    let service: String
+
+    private var didLoadCredentials = false
+    private var cachedCredentials: KrillCredentials?
+
+    init(service: String) {
+        self.service = service
+    }
+
+    func loadCredentials() -> KrillCredentials? {
+        if didLoadCredentials {
+            return cachedCredentials
         }
 
+        defer {
+            didLoadCredentials = true
+        }
+
+        guard let data = loadData(account: Accounts.credentials) else {
+            cachedCredentials = nil
+            return nil
+        }
+
+        guard let credentials = try? JSONDecoder().decode(KrillCredentials.self, from: data),
+              isValid(credentials)
+        else {
+            cachedCredentials = nil
+            return nil
+        }
+
+        cachedCredentials = credentials
+        return credentials
+    }
+
+    func saveCredentials(_ credentials: KrillCredentials) throws {
+        let normalized = KrillCredentials(
+            email: credentials.email.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: credentials.password
+        )
+        guard isValid(normalized),
+              let data = try? JSONEncoder().encode(normalized)
+        else {
+            throw KeychainStoreError.invalidData
+        }
+
+        try saveData(data, account: Accounts.credentials)
+        deleteData(account: Accounts.legacyToken)
+
+        didLoadCredentials = true
+        cachedCredentials = normalized
+    }
+
+    func deleteCredentials() {
+        deleteData(account: Accounts.credentials)
+        deleteData(account: Accounts.legacyToken)
+
+        didLoadCredentials = true
+        cachedCredentials = nil
+    }
+
+    private func isValid(_ credentials: KrillCredentials) -> Bool {
+        credentials.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            && credentials.password.isEmpty == false
+    }
+
+    private func loadData(account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -43,41 +103,20 @@ final class KeychainStore {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess else {
-            didLoadToken = true
-            cachedToken = nil
             return nil
         }
 
-        guard let data = result as? Data else {
-            didLoadToken = true
-            cachedToken = nil
-            return nil
-        }
-
-        cachedToken = String(data: data, encoding: .utf8)
-        didLoadToken = true
-        return cachedToken
+        return result as? Data
     }
 
-    func saveToken(_ token: String) throws {
-        let normalized = normalizedToken(token)
-        guard let data = normalized.data(using: .utf8) else {
-            throw KeychainStoreError.invalidData
-        }
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
+    private func saveData(_ data: Data, account: String) throws {
+        let query = keychainQuery(account: account)
         let updateAttributes: [String: Any] = [
             kSecValueData as String: data
         ]
 
         let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
         if updateStatus == errSecSuccess {
-            didLoadToken = true
-            cachedToken = normalized
             return
         }
 
@@ -94,29 +133,17 @@ final class KeychainStore {
         guard addStatus == errSecSuccess else {
             throw KeychainStoreError.unexpectedStatus(addStatus)
         }
-
-        didLoadToken = true
-        cachedToken = normalized
     }
 
-    func deleteToken() {
-        let query: [String: Any] = [
+    private func deleteData(account: String) {
+        SecItemDelete(keychainQuery(account: account) as CFDictionary)
+    }
+
+    private func keychainQuery(account: String) -> [String: Any] {
+        [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-
-        SecItemDelete(query as CFDictionary)
-
-        didLoadToken = true
-        cachedToken = nil
-    }
-
-    private func normalizedToken(_ token: String) -> String {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.lowercased().hasPrefix("bearer ") {
-            return String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return trimmed
     }
 }

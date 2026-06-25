@@ -5,6 +5,9 @@ enum KrillAPIError: LocalizedError {
     case invalidResponse
     case badStatus(Int)
     case missingData
+    case unauthorized
+    case apiError(Int?, String?)
+    case loginFailed(String?)
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +17,21 @@ enum KrillAPIError: LocalizedError {
             return "接口返回 HTTP \(status)"
         case .missingData:
             return "接口响应缺少 data 字段"
+        case .unauthorized:
+            return "登录已失效，正在尝试重新登录"
+        case .apiError(let code, let message):
+            if let message, message.isEmpty == false {
+                return message
+            }
+            if let code {
+                return "接口返回错误码 \(code)"
+            }
+            return "接口返回错误"
+        case .loginFailed(let message):
+            if let message, message.isEmpty == false {
+                return message
+            }
+            return "登录失败，请重新设置 Krill 账号"
         }
     }
 }
@@ -24,58 +42,77 @@ struct APIBundle {
     let statsRangeContext: StatsRangeContext
 }
 
-@MainActor
 struct KrillAPIClient {
     fileprivate enum Network {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
-        static let sampledTrendLimit = 64
+        static let sampledTrendLimit = 32
         static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
         static let statsChunkLength: TimeInterval = 7 * 86_400
     }
 
+    private let loginURL = URL(string: "https://www.krill-ai.com/api/auth/login")!
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
-    private let session: URLSession = {
+    private func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
         configuration.timeoutIntervalForRequest = Network.requestTimeout
         configuration.timeoutIntervalForResource = Network.resourceTimeout
         configuration.httpMaximumConnectionsPerHost = 2
         return URLSession(configuration: configuration)
-    }()
-
-    func fetchAll(token: String, requestedStatsRange: StatsRange, now: Date = Date()) async throws -> APIBundle {
-        let subscription = try await fetchSubscription(token: token)
-        let rangeContext = try UsageAggregator.statsRangeContext(
-            subscription: subscription,
-            requested: requestedStatsRange,
-            now: now
-        )
-        let stats = try await fetchStats(token: token, range: rangeContext)
-        return APIBundle(subscription: subscription, stats: stats, statsRangeContext: rangeContext)
     }
 
-    private func fetchSubscription(token: String) async throws -> SubscriptionEnvelope {
+    func login(credentials: KrillCredentials) async throws -> String {
+        var request = URLRequest(url: loginURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = Network.requestTimeout
+        applyLoginHeaders(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
+        request.setValue("https://www.krill-ai.com/login", forHTTPHeaderField: "referer")
+        request.httpBody = try JSONEncoder().encode(LoginRequestPayload(
+            email: credentials.email,
+            password: credentials.password
+        ))
+
+        let (data, response) = try await loadData(for: request)
+        do {
+            try validate(response)
+        } catch KrillAPIError.unauthorized {
+            throw KrillAPIError.loginFailed(nil)
+        }
+        return try extractLoginToken(from: data)
+    }
+
+    func fetchSubscription(token: String) async throws -> SubscriptionEnvelope {
         var request = URLRequest(url: subscriptionURL)
         request.httpMethod = "GET"
         request.timeoutInterval = Network.requestTimeout
         applyCommonHeaders(to: &request, token: token)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await loadData(for: request)
         try validate(response)
-        return try decode(SubscriptionEnvelope.self, from: data)
+        let envelope = try decode(SubscriptionEnvelope.self, from: data)
+        try validateAPIStatus(success: envelope.success, code: envelope.code, message: envelope.message)
+        return envelope
     }
 
-    private func fetchStats(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
+    func fetchStats(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
         guard shouldChunkStats(range) == false else {
             let envelope = try await fetchChunkedStats(token: token, range: range)
             releaseUnusedHeapMemory()
             return envelope
         }
 
-        return try await fetchStatsChunk(token: token, range: range)
+        let envelope = try await fetchStatsChunk(token: token, range: range)
+        releaseUnusedHeapMemory()
+        return envelope
     }
 
     private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
@@ -92,12 +129,14 @@ struct KrillAPIClient {
         )
         request.httpBody = try JSONEncoder().encode(payload)
 
-        let (fileURL, response) = try await session.download(for: request)
+        let (fileURL, response) = try await downloadFile(for: request)
         defer {
             try? FileManager.default.removeItem(at: fileURL)
         }
         try validate(response)
-        return try StatsJSONParser.decodeEnvelope(from: fileURL, trendLimit: Network.sampledTrendLimit)
+        let envelope = try StatsJSONParser.decodeEnvelope(from: fileURL, trendLimit: Network.sampledTrendLimit)
+        try validateAPIStatus(success: envelope.success, code: envelope.code, message: envelope.message)
+        return envelope
     }
 
     private func fetchChunkedStats(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
@@ -125,21 +164,53 @@ struct KrillAPIClient {
             await Task.yield()
         }
 
-        return StatsEnvelope(code: nil, data: accumulator.payload(), success: true)
+        return StatsEnvelope(code: nil, data: accumulator.payload(), success: true, message: nil)
     }
 
     private func shouldChunkStats(_ range: StatsRangeContext) -> Bool {
         range.end.timeIntervalSince(range.start) > Network.chunkedStatsThreshold
     }
 
+    private func loadData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let session = makeSession()
+        do {
+            let result = try await session.data(for: request)
+            session.invalidateAndCancel()
+            return result
+        } catch {
+            session.invalidateAndCancel()
+            throw error
+        }
+    }
+
+    private func downloadFile(for request: URLRequest) async throws -> (URL, URLResponse) {
+        let session = makeSession()
+        do {
+            let (temporaryURL, response) = try await session.download(for: request)
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("krill-stats-\(UUID().uuidString).json")
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            session.invalidateAndCancel()
+            return (destination, response)
+        } catch {
+            session.invalidateAndCancel()
+            throw error
+        }
+    }
+
     private func applyCommonHeaders(to request: inout URLRequest, token: String) {
+        applyLoginHeaders(to: &request)
+        request.setValue("https://www.krill-ai.com/app", forHTTPHeaderField: "referer")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+    }
+
+    private func applyLoginHeaders(to request: inout URLRequest) {
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "accept")
         request.setValue("zh", forHTTPHeaderField: "accept-language")
         request.setValue("zh", forHTTPHeaderField: "x-language")
-        request.setValue("https://www.krill-ai.com/app", forHTTPHeaderField: "referer")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) TrellisFloatingBall/1.0",
+            "KrillFloatingBall/1.0 (macOS)",
             forHTTPHeaderField: "user-agent"
         )
     }
@@ -149,9 +220,111 @@ struct KrillAPIClient {
             throw KrillAPIError.invalidResponse
         }
 
+        if http.statusCode == 401 {
+            throw KrillAPIError.unauthorized
+        }
+
         guard (200..<300).contains(http.statusCode) else {
             throw KrillAPIError.badStatus(http.statusCode)
         }
+    }
+
+    private func validateAPIStatus(success: Bool?, code: Int?, message: String?) throws {
+        let normalizedMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if code == 401 || normalizedMessage?.contains("invalid token") == true {
+            throw KrillAPIError.unauthorized
+        }
+        if success == false {
+            throw KrillAPIError.apiError(code, message)
+        }
+    }
+
+    private func extractLoginToken(from data: Data) throws -> String {
+        let object = try JSONSerialization.jsonObject(with: data, options: [])
+        if let envelope = object as? [String: Any] {
+            let success = envelope["success"] as? Bool
+            let code = flexibleInt(envelope["code"])
+            let message = envelope["message"] as? String
+            if code == 401 || success == false {
+                throw KrillAPIError.loginFailed(message)
+            }
+        }
+
+        guard let token = findToken(in: object) else {
+            throw KrillAPIError.missingData
+        }
+
+        let normalized = normalizedToken(token)
+        guard normalized.isEmpty == false else {
+            throw KrillAPIError.missingData
+        }
+        return normalized
+    }
+
+    private func findToken(in value: Any) -> String? {
+        let tokenKeys: Set<String> = [
+            "token",
+            "access_token",
+            "accessToken",
+            "auth_token",
+            "authToken",
+            "jwt",
+            "id_token",
+            "idToken",
+            "authorization"
+        ]
+
+        if let dictionary = value as? [String: Any] {
+            for key in tokenKeys {
+                if let token = dictionary[key] as? String, token.isEmpty == false {
+                    return token
+                }
+            }
+            if let token = dictionary["data"] as? String, looksLikeToken(token) {
+                return token
+            }
+            for nested in dictionary.values {
+                if let token = findToken(in: nested) {
+                    return token
+                }
+            }
+        }
+
+        if let array = value as? [Any] {
+            for nested in array {
+                if let token = findToken(in: nested) {
+                    return token
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func looksLikeToken(_ value: String) -> Bool {
+        let normalized = normalizedToken(value)
+        return normalized.hasPrefix("eyJ") && normalized.split(separator: ".").count >= 3
+    }
+
+    private func normalizedToken(_ token: String) -> String {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("bearer ") {
+            return String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    private func flexibleInt(_ value: Any?) -> Int? {
+        if let int = value as? Int {
+            return int
+        }
+        if let double = value as? Double, double.isFinite {
+            return Int(double.rounded())
+        }
+        if let string = value as? String {
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -166,6 +339,11 @@ struct KrillAPIClient {
     }
 }
 
+private struct LoginRequestPayload: Encodable {
+    let email: String
+    let password: String
+}
+
 private struct StatsRequestPayload: Encodable {
     let startTime: String
     let endTime: String
@@ -176,18 +354,13 @@ private struct StatsRequestPayload: Encodable {
     }
 }
 
-@MainActor
 enum LocalProtocolDateFormatter {
-    private static let formatter: DateFormatter = {
+    static func string(from date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
-        return formatter
-    }()
-
-    static func string(from date: Date) -> String {
         return formatter.string(from: date)
     }
 }
@@ -195,7 +368,23 @@ enum LocalProtocolDateFormatter {
 struct SubscriptionEnvelope: Decodable {
     let code: Int?
     let data: SubscriptionPayload?
+    let message: String?
     let success: Bool?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.code = container.decodeFlexibleInt(forKey: .code)
+        self.data = (try? container.decodeIfPresent(SubscriptionPayload.self, forKey: .data)) ?? nil
+        self.message = container.decodeFlexibleString(forKey: .message)
+        self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case data
+        case message
+        case success
+    }
 }
 
 struct SubscriptionPayload: Decodable {
@@ -268,23 +457,27 @@ struct StatsEnvelope: Decodable {
     let code: Int?
     let data: StatsPayload?
     let success: Bool?
+    let message: String?
 
-    init(code: Int?, data: StatsPayload?, success: Bool?) {
+    init(code: Int?, data: StatsPayload?, success: Bool?, message: String?) {
         self.code = code
         self.data = data
         self.success = success
+        self.message = message
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.code = try container.decodeIfPresent(Int.self, forKey: .code)
-        self.data = try container.decodeIfPresent(StatsPayload.self, forKey: .data)
+        self.code = container.decodeFlexibleInt(forKey: .code)
+        self.data = (try? container.decodeIfPresent(StatsPayload.self, forKey: .data)) ?? nil
         self.success = try container.decodeIfPresent(Bool.self, forKey: .success)
+        self.message = container.decodeFlexibleString(forKey: .message)
     }
 
     enum CodingKeys: String, CodingKey {
         case code
         case data
+        case message
         case success
     }
 }
@@ -504,6 +697,7 @@ private struct JSONScanner {
         try consumeObjectStart()
         var code: Int?
         var payload: StatsPayload?
+        var message: String?
         var success: Bool?
 
         while try consumeObjectEndIfPresent() == false {
@@ -514,6 +708,8 @@ private struct JSONScanner {
                 code = try parseFlexibleInt()
             case "data":
                 payload = try consumeNullIfPresent() ? nil : parseStatsPayload()
+            case "message":
+                message = try parseFlexibleString()
             case "success":
                 success = try parseBoolOrNull()
             default:
@@ -525,7 +721,7 @@ private struct JSONScanner {
             }
         }
 
-        return StatsEnvelope(code: code, data: payload, success: success)
+        return StatsEnvelope(code: code, data: payload, success: success, message: message)
     }
 
     private mutating func parseStatsPayload() throws -> StatsPayload {
@@ -800,19 +996,44 @@ private struct JSONScanner {
         case 116:
             return "\t"
         case 117:
-            let scalar = try parseUnicodeEscape()
-            return String(scalar)
+            return try parseUnicodeEscape()
         default:
             throw JSONScanError.invalidString
         }
     }
 
-    private mutating func parseUnicodeEscape() throws -> UnicodeScalar {
+    private mutating func parseUnicodeEscape() throws -> String {
         let value = try parseFourHexDigits()
+        if (0xD800...0xDBFF).contains(value) {
+            guard currentByte == 92 else {
+                throw JSONScanError.invalidString
+            }
+            advance()
+            guard currentByte == 117 else {
+                throw JSONScanError.invalidString
+            }
+            advance()
+
+            let low = try parseFourHexDigits()
+            guard (0xDC00...0xDFFF).contains(low) else {
+                throw JSONScanError.invalidString
+            }
+
+            let scalarValue = 0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00)
+            guard let scalar = UnicodeScalar(scalarValue) else {
+                throw JSONScanError.invalidString
+            }
+            return String(scalar)
+        }
+
+        guard (0xDC00...0xDFFF).contains(value) == false else {
+            throw JSONScanError.invalidString
+        }
+
         guard let scalar = UnicodeScalar(value) else {
             throw JSONScanError.invalidString
         }
-        return scalar
+        return String(scalar)
     }
 
     private mutating func parseFourHexDigits() throws -> UInt32 {
@@ -939,7 +1160,7 @@ private struct JSONScanner {
         case 91:
             try skipArray()
         case 34:
-            _ = try parseString()
+            try skipString()
         case 110:
             guard try consumeNullIfPresent() else {
                 throw JSONScanError.unexpectedToken
@@ -954,7 +1175,7 @@ private struct JSONScanner {
     private mutating func skipObject() throws {
         try consumeObjectStart()
         while try consumeObjectEndIfPresent() == false {
-            _ = try parseString()
+            try skipString()
             try consumeColon()
             try skipValue()
             try consumeCommaOrObjectEnd()
@@ -978,6 +1199,42 @@ private struct JSONScanner {
     private mutating func skipWhitespace() {
         while let byte = currentByte, byte == 32 || byte == 10 || byte == 13 || byte == 9 {
             advance()
+        }
+    }
+
+    private mutating func skipString() throws {
+        skipWhitespace()
+        guard currentByte == 34 else {
+            throw JSONScanError.unexpectedToken
+        }
+        advance()
+
+        while let byte = currentByte {
+            advance()
+            if byte == 34 {
+                return
+            }
+            if byte == 92 {
+                try skipEscapedCharacter()
+            }
+        }
+
+        throw JSONScanError.unexpectedEnd
+    }
+
+    private mutating func skipEscapedCharacter() throws {
+        guard let byte = currentByte else {
+            throw JSONScanError.unexpectedEnd
+        }
+        advance()
+
+        switch byte {
+        case 34, 47, 92, 98, 102, 110, 114, 116:
+            return
+        case 117:
+            _ = try parseFourHexDigits()
+        default:
+            throw JSONScanError.invalidString
         }
     }
 

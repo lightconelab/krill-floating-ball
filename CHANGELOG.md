@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.6 - 2026-06-25
+
+- Switched the public setup flow to Krill email/password login stored in macOS Keychain, with runtime API tokens kept in memory only.
+- Added standard edit menu support and explicit Cmd/Ctrl editing shortcuts for the Krill account prompt, including paste in the password field.
+- Made credential changes cancel stale refresh work and start a fresh fetch immediately, so the widget updates as soon as login succeeds instead of waiting for a queued refresh.
+- Disabled credential prompt autofill content type, text completion, and Writing Tools affordances to reduce unnecessary system helper activation.
+- Tightened network memory behavior by disabling cookies, cache, and URL credential storage, invalidating per-request URLSession instances, and releasing heap pressure after refresh and panel teardown.
+- Rewrote the Chinese and English README for public open-source use, refreshed screenshots, and removed obsolete token-era README images.
+
 ## v0.2.5 - 2026-06-23
 
 - Fixed the widget restore path so showing the hidden widget always brings back the normal floating ball unless it is actually attached to a screen edge.

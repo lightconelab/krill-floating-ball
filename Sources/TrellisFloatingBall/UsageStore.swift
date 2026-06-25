@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @MainActor
@@ -20,7 +21,8 @@ final class UsageStore {
     private var needsRefreshAfterCurrent = false
     private var refreshGeneration = 0
     private var refreshIntervalSeconds: Int
-    private var selectedStatsRange: StatsRange = .quotaWeek
+    private var selectedStatsRange: StatsRange = .today
+    private var cachedToken: String?
 
     init(keychain: KeychainStore) {
         self.keychain = keychain
@@ -42,6 +44,7 @@ final class UsageStore {
         timer = nil
         refreshTask?.cancel()
         refreshTask = nil
+        cachedToken = nil
     }
 
     func currentRefreshIntervalSeconds() -> Int {
@@ -62,11 +65,7 @@ final class UsageStore {
             return
         }
         selectedStatsRange = range
-        refreshGeneration += 1
-        if isRefreshing {
-            needsRefreshAfterCurrent = true
-            refreshTask?.cancel()
-        }
+        cancelCurrentRefreshForImmediateReplacement()
         if snapshot.availableStatsRanges.contains(range), snapshot.statsRange != range {
             snapshot.statsRange = range
             snapshot.todayCost = nil
@@ -78,6 +77,12 @@ final class UsageStore {
             snapshot.lastError = nil
             emit()
         }
+        refresh(manual: true)
+    }
+
+    func credentialsDidChangeAndRefreshNow() {
+        cachedToken = nil
+        cancelCurrentRefreshForImmediateReplacement()
         refresh(manual: true)
     }
 
@@ -96,24 +101,26 @@ final class UsageStore {
             return
         }
 
-        guard let token = keychain.loadToken(), token.isEmpty == false else {
-            updateSnapshotIfChanged(.missingToken(previous: snapshot))
-            scheduleNextRefresh()
+        guard let credentials = keychain.loadCredentials() else {
+            cachedToken = nil
+            updateSnapshotIfChanged(.missingCredentials(previous: snapshot))
             return
         }
+
+        markRefreshStarted()
 
         isRefreshing = true
         let requestedRange = selectedStatsRange
         let generation = refreshGeneration
 
         refreshTask = Task { [weak self] in
-            await self?.load(token: token, requestedRange: requestedRange, generation: generation)
+            await self?.load(credentials: credentials, requestedRange: requestedRange, generation: generation)
         }
     }
 
     private func scheduleNextRefresh() {
         timer?.invalidate()
-        guard isRunning else {
+        guard isRunning, snapshot.needsToken == false else {
             timer = nil
             return
         }
@@ -128,31 +135,48 @@ final class UsageStore {
         self.timer = timer
     }
 
-    private func load(token: String, requestedRange: StatsRange, generation: Int) async {
+    private func markRefreshStarted() {
+        var next = snapshot
+        next.needsToken = false
+        next.isLoading = true
+        next.lastError = nil
+        if next != snapshot {
+            snapshot = next
+            emit()
+        }
+    }
+
+    private func load(credentials: KrillCredentials, requestedRange: StatsRange, generation: Int) async {
         var didUpdateSnapshot = false
 
         defer {
-            isRefreshing = false
-            refreshTask = nil
-            let shouldRefreshAgain = needsRefreshAfterCurrent
-            needsRefreshAfterCurrent = false
-            if shouldRefreshAgain, isRunning {
-                if didUpdateSnapshot {
-                    emit()
+            if generation == refreshGeneration {
+                isRefreshing = false
+                refreshTask = nil
+                let shouldRefreshAgain = needsRefreshAfterCurrent
+                needsRefreshAfterCurrent = false
+                if shouldRefreshAgain, isRunning {
+                    if didUpdateSnapshot {
+                        emit()
+                    }
+                    refresh(manual: false)
+                } else {
+                    if didUpdateSnapshot {
+                        emit()
+                    }
+                    scheduleNextRefresh()
                 }
-                refresh(manual: false)
-            } else {
-                if didUpdateSnapshot {
-                    emit()
-                }
-                scheduleNextRefresh()
             }
+            malloc_zone_pressure_relief(nil, 0)
         }
 
         do {
-            let bundle = try await client.fetchAll(token: token, requestedStatsRange: requestedRange)
+            let bundle = try await fetchWithLogin(
+                credentials: credentials,
+                requestedStatsRange: requestedRange,
+                generation: generation
+            )
             guard isCurrentRefresh(generation: generation, requestedRange: requestedRange) else {
-                needsRefreshAfterCurrent = true
                 return
             }
 
@@ -166,14 +190,108 @@ final class UsageStore {
             }
 
             guard isCurrentRefresh(generation: generation, requestedRange: requestedRange) else {
-                needsRefreshAfterCurrent = true
                 return
             }
 
             snapshot.isStale = snapshot.lastRefresh != nil
             snapshot.isLoading = false
             snapshot.lastError = error.localizedDescription
+            if requiresCredentialReset(error) {
+                cachedToken = nil
+                snapshot.needsToken = true
+            }
             didUpdateSnapshot = true
+        }
+    }
+
+    private func cancelCurrentRefreshForImmediateReplacement() {
+        refreshGeneration += 1
+        needsRefreshAfterCurrent = false
+        timer?.invalidate()
+        timer = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        isRefreshing = false
+    }
+
+    private func fetchWithLogin(
+        credentials: KrillCredentials,
+        requestedStatsRange: StatsRange,
+        generation: Int
+    ) async throws -> APIBundle {
+        do {
+            let token = try await loginIfNeeded(credentials: credentials, force: false)
+            return try await fetchBundle(token: token, requestedStatsRange: requestedStatsRange, generation: generation)
+        } catch KrillAPIError.unauthorized {
+            cachedToken = nil
+            let token = try await loginIfNeeded(credentials: credentials, force: true)
+            do {
+                return try await fetchBundle(token: token, requestedStatsRange: requestedStatsRange, generation: generation)
+            } catch KrillAPIError.unauthorized {
+                cachedToken = nil
+                throw KrillAPIError.loginFailed("登录状态已失效，请重新设置 Krill 账号")
+            }
+        }
+    }
+
+    private func fetchBundle(token: String, requestedStatsRange: StatsRange, generation: Int) async throws -> APIBundle {
+        let subscription = try await client.fetchSubscription(token: token)
+        let rangeContext = try UsageAggregator.statsRangeContext(
+            subscription: subscription,
+            requested: requestedStatsRange,
+            now: Date()
+        )
+        try publishSubscriptionSnapshot(
+            subscription: subscription,
+            rangeContext: rangeContext,
+            generation: generation,
+            requestedRange: requestedStatsRange
+        )
+        let stats = try await client.fetchStats(token: token, range: rangeContext)
+        return APIBundle(subscription: subscription, stats: stats, statsRangeContext: rangeContext)
+    }
+
+    private func publishSubscriptionSnapshot(
+        subscription: SubscriptionEnvelope,
+        rangeContext: StatsRangeContext,
+        generation: Int,
+        requestedRange: StatsRange
+    ) throws {
+        guard isCurrentRefresh(generation: generation, requestedRange: requestedRange) else {
+            throw CancellationError()
+        }
+
+        let next = try UsageAggregator.makeSubscriptionSnapshot(
+            subscription: subscription,
+            statsRangeContext: rangeContext,
+            previous: snapshot
+        )
+        if next != snapshot {
+            snapshot = next
+            emit()
+        }
+    }
+
+    private func loginIfNeeded(credentials: KrillCredentials, force: Bool) async throws -> String {
+        if force == false, let cachedToken, cachedToken.isEmpty == false {
+            return cachedToken
+        }
+
+        let token = try await client.login(credentials: credentials)
+        cachedToken = token
+        return token
+    }
+
+    private func requiresCredentialReset(_ error: Error) -> Bool {
+        guard let apiError = error as? KrillAPIError else {
+            return false
+        }
+
+        switch apiError {
+        case .loginFailed:
+            return true
+        default:
+            return false
         }
     }
 

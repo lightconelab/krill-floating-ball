@@ -128,12 +128,12 @@ struct UsageSnapshot: Equatable {
         lastError: nil
     )
 
-    static func missingToken(previous: UsageSnapshot) -> UsageSnapshot {
+    static func missingCredentials(previous: UsageSnapshot) -> UsageSnapshot {
         var next = previous
         next.needsToken = true
         next.isLoading = false
         next.isStale = previous.lastRefresh != nil
-        next.lastError = "请通过菜单栏设置 Krill Token"
+        next.lastError = "请通过菜单栏设置 Krill 账号"
         return next
     }
 }

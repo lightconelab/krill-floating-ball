@@ -97,8 +97,7 @@ final class UsageWidgetView: NSView {
     init(frame frameRect: NSRect, displayMode: DisplayMode = .ball) {
         self.displayMode = displayMode
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
+        wantsLayer = false
         updateLayerScale()
     }
 
@@ -897,7 +896,6 @@ final class UsageWidgetView: NSView {
                 alignment: .center
             )
         }
-        drawStatCardOverlayIfNeeded(in: rect, alpha: alpha)
     }
 
     private func drawStatsStatus(in content: NSRect, refreshRect: NSRect, rangeStartX: CGFloat, alpha: CGFloat) {
@@ -945,9 +943,6 @@ final class UsageWidgetView: NSView {
         if snapshot.isLoading {
             return NSColor(hex: 0xF6FAFF, alpha: alpha)
         }
-        if snapshot.lastError != nil {
-            return NSColor(hex: 0xFFF8F8, alpha: alpha)
-        }
         return NSColor.white.withAlphaComponent(alpha)
     }
 
@@ -955,32 +950,7 @@ final class UsageWidgetView: NSView {
         if snapshot.isLoading {
             return NSColor(hex: 0xBBD4FF, alpha: 0.9 * alpha)
         }
-        if snapshot.lastError != nil {
-            return NSColor(hex: 0xF3B9BE, alpha: 0.9 * alpha)
-        }
         return NSColor(hex: 0xE5EAF0, alpha: alpha)
-    }
-
-    private func drawStatCardOverlayIfNeeded(in rect: NSRect, alpha: CGFloat) {
-        let text: String
-        let color: NSColor
-        if snapshot.isLoading {
-            text = "更新中"
-            color = NSColor(hex: 0x1A56DB)
-        } else if snapshot.lastError != nil {
-            text = "获取失败"
-            color = NSColor(hex: 0xE02D3C)
-        } else {
-            return
-        }
-
-        drawText(
-            text,
-            rect: NSRect(x: rect.minX + 10, y: rect.maxY - 20, width: rect.width - 20, height: 12),
-            font: .systemFont(ofSize: 10.5, weight: .semibold),
-            color: color.withAlphaComponent(0.78 * alpha),
-            alignment: .center
-        )
     }
 
     private func drawStatsRangeButtons(in rect: NSRect, startX: CGFloat, maxX: CGFloat, alpha: CGFloat) {
@@ -1301,7 +1271,7 @@ final class UsageWidgetView: NSView {
         let items = snapshot.subscriptions
         guard items.isEmpty == false else {
             drawCentered(
-                snapshot.needsToken ? "请先在菜单栏设置 Krill Token" : "暂无生效套餐",
+                snapshot.needsToken ? "请先在菜单栏设置 Krill 账号" : "暂无生效套餐",
                 rect: listRect,
                 font: .systemFont(ofSize: 12.6, weight: .medium),
                 color: NSColor(hex: 0x64748B).withAlphaComponent(alpha)
@@ -1576,10 +1546,10 @@ final class UsageWidgetView: NSView {
             return NSColor(hex: 0x1A56DB)
         }
         if percent > 30 {
-            return NSColor(hex: 0x0D9F6E)
+            return NSColor(hex: 0x00D4FF)
         }
         if percent > 10 {
-            return NSColor(hex: 0xD97706)
+            return NSColor(hex: 0xF59E0B)
         }
         return NSColor(hex: 0xE02D3C)
     }

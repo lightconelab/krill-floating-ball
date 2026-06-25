@@ -11,7 +11,7 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 cd "$ROOT_DIR"
 
-swift build -c release
+swift build -c release -Xswiftc -Osize
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
 rm -rf "$APP_DIR"
@@ -25,5 +25,8 @@ for resource in "$ROOT_DIR"/Resources/*; do
   fi
 done
 chmod +x "$MACOS_DIR/$EXECUTABLE_NAME"
+if command -v strip >/dev/null 2>&1; then
+  strip -x "$MACOS_DIR/$EXECUTABLE_NAME" || true
+fi
 
 echo "$APP_DIR"
