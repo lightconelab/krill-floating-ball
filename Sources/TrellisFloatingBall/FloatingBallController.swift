@@ -138,6 +138,11 @@ final class FloatingBallController {
         applyEdgePolicy(animated: true, preserveAttachedEdge: true)
     }
 
+    func preferencesDidChange() {
+        ballView.reloadPreferences()
+        panelView?.reloadPreferences()
+    }
+
     func update(snapshot: UsageSnapshot) {
         latestSnapshot = snapshot
         ballView.snapshot = snapshot

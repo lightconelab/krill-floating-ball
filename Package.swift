@@ -16,6 +16,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "TrellisFloatingBall"
+        ),
+        .testTarget(
+            name: "TrellisFloatingBallTests",
+            dependencies: ["TrellisFloatingBall"]
         )
     ]
 )

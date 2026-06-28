@@ -92,6 +92,7 @@ final class UsageWidgetView: NSView {
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
+    private var balanceThresholds = BalanceThresholds.load()
     private let displayMode: DisplayMode
 
     init(frame frameRect: NSRect, displayMode: DisplayMode = .ball) {
@@ -266,6 +267,11 @@ final class UsageWidgetView: NSView {
         updateAnimationScheduling()
     }
 
+    func reloadPreferences() {
+        balanceThresholds = BalanceThresholds.load()
+        needsDisplay = true
+    }
+
     private func shouldRedrawSnapshotChange(from oldSnapshot: UsageSnapshot, to newSnapshot: UsageSnapshot) -> Bool {
         guard oldSnapshot != newSnapshot else {
             return false
@@ -275,9 +281,11 @@ final class UsageWidgetView: NSView {
             return true
         }
 
-        return oldSnapshot.weeklyRemaining != newSnapshot.weeklyRemaining
-            || oldSnapshot.weeklyTotal != newSnapshot.weeklyTotal
-            || oldSnapshot.weekEnd != newSnapshot.weekEnd
+        return oldSnapshot.primaryMode != newSnapshot.primaryMode
+            || oldSnapshot.primaryAmount != newSnapshot.primaryAmount
+            || oldSnapshot.primaryTotal != newSnapshot.primaryTotal
+            || oldSnapshot.primaryEnd != newSnapshot.primaryEnd
+            || oldSnapshot.walletBalance != newSnapshot.walletBalance
             || oldSnapshot.needsToken != newSnapshot.needsToken
     }
 
@@ -330,7 +338,9 @@ final class UsageWidgetView: NSView {
     }
 
     private func animationFrameInterval() -> TimeInterval? {
-        guard let percent = snapshot.weeklyPercent else {
+        guard snapshot.primaryMode == .quotaPool,
+              let percent = snapshot.primaryPercent
+        else {
             return nil
         }
         if percent <= 10 {
@@ -347,7 +357,7 @@ final class UsageWidgetView: NSView {
               animationActive,
               window?.isVisible == true,
               let interval = currentAnimationInterval,
-              let percent = snapshot.weeklyPercent
+              let percent = snapshot.primaryPercent
         else {
             updateAnimationScheduling()
             return
@@ -393,7 +403,7 @@ final class UsageWidgetView: NSView {
 
     private func drawLiquidBall() {
         let rect = ballRect()
-        guard let percentValue = snapshot.weeklyPercent else {
+        guard snapshot.primaryMode != .empty else {
             let idleColor = NSColor(hex: 0x9EDFFF)
             drawBallShadow(in: rect, color: idleColor, pulse: 0.35)
 
@@ -404,7 +414,24 @@ final class UsageWidgetView: NSView {
             NSGraphicsContext.restoreGraphicsState()
 
             drawBallBorder(in: rect, color: idleColor, pulse: 0.35, critical: false)
-            drawWeeklyAmount(in: rect, color: NSColor(hex: 0xF3FAFF))
+            drawPrimaryAmount(in: rect, color: NSColor(hex: 0xF3FAFF))
+            return
+        }
+
+        guard snapshot.primaryMode == .quotaPool,
+              let percentValue = snapshot.primaryPercent
+        else {
+            let balanceColor = quotaColor(for: balanceThresholds.signalPercent(for: snapshot.primaryAmount ?? snapshot.walletBalance))
+            drawBallShadow(in: rect, color: balanceColor, pulse: 0.35)
+
+            let sphere = NSBezierPath(ovalIn: rect)
+            NSGraphicsContext.saveGraphicsState()
+            sphere.addClip()
+            drawGlassHighlights(in: rect)
+            NSGraphicsContext.restoreGraphicsState()
+
+            drawBallBorder(in: rect, color: balanceColor, pulse: 0.35, critical: false)
+            drawPrimaryAmount(in: rect, color: NSColor(hex: 0xF3FAFF))
             return
         }
 
@@ -425,7 +452,7 @@ final class UsageWidgetView: NSView {
         NSGraphicsContext.restoreGraphicsState()
 
         drawBallBorder(in: rect, color: warning ? liquidColor : NSColor(hex: 0x9EDFFF), pulse: pulse, critical: critical)
-        drawWeeklyAmount(in: rect, color: warning ? .white : NSColor(hex: 0xF3FAFF))
+        drawPrimaryAmount(in: rect, color: warning ? .white : NSColor(hex: 0xF3FAFF))
     }
 
     private func drawBallShadow(in rect: NSRect, color: NSColor, pulse: CGFloat) {
@@ -537,8 +564,32 @@ final class UsageWidgetView: NSView {
         inner.stroke()
     }
 
-    private func drawWeeklyAmount(in rect: NSRect, color: NSColor) {
-        let amount = Formatters.usd(snapshot.weeklyRemaining)
+    private func drawPrimaryAmount(in rect: NSRect, color: NSColor) {
+        let amount: String
+        let subtitle: String?
+        switch snapshot.primaryMode {
+        case .quotaPool:
+            amount = Formatters.usd(snapshot.primaryAmount)
+            subtitle = primaryRemainingText()
+        case .balance:
+            amount = Formatters.usd(snapshot.primaryAmount ?? snapshot.walletBalance)
+            subtitle = "余额"
+        case .empty:
+            amount = snapshot.needsToken ? "未登录" : "无额度"
+            subtitle = nil
+        }
+
+        guard let subtitle, subtitle.isEmpty == false else {
+            drawCentered(
+                amount,
+                rect: NSRect(x: rect.minX + 7, y: rect.midY - 11, width: rect.width - 14, height: 22),
+                font: fittedMonospacedFont(text: amount, maxSize: 16, minSize: 10.5, width: rect.width - 14),
+                color: color,
+                shadow: NSColor.black.withAlphaComponent(0.72)
+            )
+            return
+        }
+
         drawCentered(
             amount,
             rect: NSRect(x: rect.minX + 7, y: rect.midY - 16, width: rect.width - 14, height: 22),
@@ -546,10 +597,8 @@ final class UsageWidgetView: NSView {
             color: color,
             shadow: NSColor.black.withAlphaComponent(0.72)
         )
-
-        let time = weekRemainingText()
         drawCentered(
-            time,
+            subtitle,
             rect: NSRect(x: rect.minX + 10, y: rect.midY + 7, width: rect.width - 20, height: 14),
             font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold),
             color: color.withAlphaComponent(0.86),
@@ -576,9 +625,12 @@ final class UsageWidgetView: NSView {
                 height: bounds.height - 10
             ))
         }
-        let percentValue = snapshot.weeklyPercent
-        let percent = CGFloat(max(0, min(100, percentValue ?? 0)) / 100)
-        let tint = quotaColor(for: percentValue)
+        let percentValue = snapshot.primaryPercent
+        let isBalanceMode = snapshot.primaryMode == .balance
+        let percent = isBalanceMode ? 1 : CGFloat(max(0, min(100, percentValue ?? 0)) / 100)
+        let tint = isBalanceMode
+            ? quotaColor(for: balanceThresholds.signalPercent(for: snapshot.primaryAmount ?? snapshot.walletBalance))
+            : quotaColor(for: percentValue)
         let radius = min(rect.width, rect.height) / 2
         let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
 
@@ -596,7 +648,7 @@ final class UsageWidgetView: NSView {
         path.lineWidth = 0.6
         path.stroke()
 
-        if percent > 0 {
+        if percent > 0, snapshot.primaryMode != .empty {
             NSGraphicsContext.saveGraphicsState()
             path.addClip()
             let fillRect: NSRect
@@ -619,7 +671,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func drawExpandedPanel(progress: CGFloat) {
-        let state = QuotaState(percent: snapshot.weeklyPercent)
+        let state = QuotaState(percent: snapshot.primaryPercent)
         let height = currentPanelHeight()
         let width = currentPanelWidth()
         let panelRect = NSRect(
@@ -1566,11 +1618,11 @@ final class UsageWidgetView: NSView {
         return wrapped ? "(剩余\(text))" : "剩余\(text)"
     }
 
-    private func weekRemainingText() -> String {
-        guard let weekEnd = snapshot.weekEnd else {
+    private func primaryRemainingText() -> String {
+        guard let end = snapshot.primaryEnd else {
             return "--"
         }
-        return durationText(seconds: max(0, weekEnd.timeIntervalSince(Date())))
+        return durationText(seconds: max(0, end.timeIntervalSince(Date())))
     }
 
     private func durationText(seconds: TimeInterval) -> String {
@@ -1790,7 +1842,7 @@ final class UsageWidgetView: NSView {
         if let shadow {
             let textShadow = NSShadow()
             textShadow.shadowColor = shadow
-            textShadow.shadowBlurRadius = 12
+            textShadow.shadowBlurRadius = 5
             textShadow.shadowOffset = .zero
             attributes[.shadow] = textShadow
         }

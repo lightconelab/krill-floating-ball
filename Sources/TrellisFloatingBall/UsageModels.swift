@@ -6,6 +6,87 @@ struct CacheRate: Equatable {
     let percent: Double
 }
 
+struct BalanceThresholds: Equatable {
+    private enum Defaults {
+        static let ampleKey = "balanceThresholdAmpleUsd"
+        static let normalKey = "balanceThresholdNormalUsd"
+        static let lowKey = "balanceThresholdLowUsd"
+        static let ample = 50.0
+        static let normal = 35.0
+        static let low = 10.0
+    }
+
+    let ample: Double
+    let normal: Double
+    let low: Double
+
+    static let standard = BalanceThresholds(
+        ample: Defaults.ample,
+        normal: Defaults.normal,
+        low: Defaults.low
+    )
+
+    var isValid: Bool {
+        ample > normal && normal > low && low >= 0
+    }
+
+    static func load() -> BalanceThresholds {
+        let defaults = UserDefaults.standard
+        let hasSavedValue = defaults.object(forKey: Defaults.ampleKey) != nil
+            || defaults.object(forKey: Defaults.normalKey) != nil
+            || defaults.object(forKey: Defaults.lowKey) != nil
+        guard hasSavedValue else {
+            return .standard
+        }
+
+        let loaded = BalanceThresholds(
+            ample: defaults.double(forKey: Defaults.ampleKey),
+            normal: defaults.double(forKey: Defaults.normalKey),
+            low: defaults.double(forKey: Defaults.lowKey)
+        )
+        return loaded.isValid ? loaded : .standard
+    }
+
+    static func save(_ thresholds: BalanceThresholds) {
+        guard thresholds.isValid else {
+            return
+        }
+        let defaults = UserDefaults.standard
+        defaults.set(thresholds.ample, forKey: Defaults.ampleKey)
+        defaults.set(thresholds.normal, forKey: Defaults.normalKey)
+        defaults.set(thresholds.low, forKey: Defaults.lowKey)
+    }
+
+    static func reset() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Defaults.ampleKey)
+        defaults.removeObject(forKey: Defaults.normalKey)
+        defaults.removeObject(forKey: Defaults.lowKey)
+    }
+
+    func signalPercent(for balance: Double?) -> Double? {
+        guard let balance, balance > 0 else {
+            return nil
+        }
+        if balance >= ample {
+            return 100
+        }
+        if balance >= normal {
+            return 45
+        }
+        if balance >= low {
+            return 20
+        }
+        return 0
+    }
+}
+
+enum PrimaryDisplayMode: Equatable {
+    case quotaPool
+    case balance
+    case empty
+}
+
 enum StatsRange: String, CaseIterable, Equatable {
     case quotaWeek
     case subscriptionPeriod
@@ -64,6 +145,11 @@ struct SubscriptionDisplayItem: Equatable {
 }
 
 struct UsageSnapshot: Equatable {
+    var primaryMode: PrimaryDisplayMode
+    var primaryAmount: Double?
+    var primaryTotal: Double?
+    var primaryEnd: Date?
+
     var weeklyRemaining: Double?
     var weeklyUsed: Double?
     var weeklyTotal: Double?
@@ -100,7 +186,22 @@ struct UsageSnapshot: Equatable {
         return max(0, min(100, remaining / total * 100))
     }
 
+    var primaryPercent: Double? {
+        guard primaryMode == .quotaPool,
+              let amount = primaryAmount,
+              let total = primaryTotal,
+              total > 0
+        else {
+            return nil
+        }
+        return max(0, min(100, amount / total * 100))
+    }
+
     static let placeholder = UsageSnapshot(
+        primaryMode: .empty,
+        primaryAmount: nil,
+        primaryTotal: nil,
+        primaryEnd: nil,
         weeklyRemaining: nil,
         weeklyUsed: nil,
         weeklyTotal: nil,
@@ -130,6 +231,15 @@ struct UsageSnapshot: Equatable {
 
     static func missingCredentials(previous: UsageSnapshot) -> UsageSnapshot {
         var next = previous
+        next.primaryMode = .empty
+        next.primaryAmount = nil
+        next.primaryTotal = nil
+        next.primaryEnd = nil
+        next.weeklyRemaining = nil
+        next.weeklyUsed = nil
+        next.weeklyTotal = nil
+        next.weekStart = nil
+        next.weekEnd = nil
         next.needsToken = true
         next.isLoading = false
         next.isStale = previous.lastRefresh != nil
@@ -164,26 +274,26 @@ enum QuotaState {
     var color: NSColor {
         switch self {
         case .healthy:
-            return NSColor(hex: 0x00FF88)
+            return NSColor(hex: 0x1A56DB)
         case .caution:
-            return NSColor(hex: 0xFFAA00)
+            return NSColor(hex: 0x00D4FF)
         case .warning:
-            return NSColor(hex: 0xFF5533)
+            return NSColor(hex: 0xF59E0B)
         case .critical:
-            return NSColor(hex: 0xFF0044)
+            return NSColor(hex: 0xE02D3C)
         }
     }
 
     var secondaryColor: NSColor {
         switch self {
         case .healthy:
-            return NSColor(hex: 0x00D4FF)
+            return NSColor(hex: 0x9EDFFF)
         case .caution:
-            return NSColor(hex: 0xFFE16A)
+            return NSColor(hex: 0x7CEEFF)
         case .warning:
-            return NSColor(hex: 0xFF8A45)
+            return NSColor(hex: 0xFBBF24)
         case .critical:
-            return NSColor(hex: 0xFF3F7E)
+            return NSColor(hex: 0xFB7185)
         }
     }
 

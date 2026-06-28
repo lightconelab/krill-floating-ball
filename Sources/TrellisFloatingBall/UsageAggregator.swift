@@ -2,6 +2,22 @@ import Foundation
 
 @MainActor
 enum UsageAggregator {
+    private struct QuotaAmounts {
+        let remaining: Double
+        let used: Double
+        let total: Double
+        let start: Date?
+        let end: Date?
+    }
+
+    private struct SubscriptionQuotaSummary {
+        let displayItem: SubscriptionDisplayItem
+        let poolQuota: QuotaAmounts?
+        let totalQuota: QuotaAmounts?
+        let recurringWindowStart: Date?
+        let recurringWindowEnd: Date?
+    }
+
     static func makeSnapshot(bundle: APIBundle, now: Date = Date()) throws -> UsageSnapshot {
         try makeSnapshot(
             subscription: bundle.subscription,
@@ -51,34 +67,8 @@ enum UsageAggregator {
         }
 
         let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
-
-        let subscriptionDisplays = activeSubscriptions.map { item in
-            let start = APIDateParser.parse(item.subscriptionStartAt)
-            let expiry = APIDateParser.parse(item.subscriptionEndAt)
-            let weekStart = APIDateParser.parse(item.quota?.windowStartAt)
-            let weekEnd = APIDateParser.parse(item.quota?.windowResetAt)
-            let weeklyTotal = weeklyLimit(item)
-            let weeklyUsed = weeklyTotal.map { _ in weeklyUsedAmount(item) }
-            let weeklyRemaining = weeklyTotal.map { total in
-                weeklyRemainingAmountFromAPI(item) ?? max(0, total - (weeklyUsed ?? 0))
-            }
-            let monthlyTotal = totalLimit(item)
-            let monthlyUsed = monthlyTotal.map { _ in decimal(item.totalUsedUsd) }
-            let monthlyRemaining = monthlyTotal.map { total in max(0, total - (monthlyUsed ?? 0)) }
-
-            return SubscriptionDisplayItem(
-                name: item.plan?.name ?? "未命名套餐",
-                start: start,
-                expiry: expiry,
-                weeklyRemaining: weeklyRemaining,
-                weeklyUsed: weeklyUsed,
-                weeklyTotal: weeklyTotal,
-                weekStart: weekStart,
-                weekEnd: weekEnd,
-                monthlyRemaining: monthlyRemaining,
-                monthlyTotal: monthlyTotal
-            )
-        }.sorted { left, right in
+        let quotaSummaries = activeSubscriptions.map { subscriptionQuotaSummary(for: $0) }
+        let subscriptionDisplays = quotaSummaries.map(\.displayItem).sorted { left, right in
             let leftRemaining = left.monthlyRemaining ?? -.infinity
             let rightRemaining = right.monthlyRemaining ?? -.infinity
 
@@ -88,49 +78,17 @@ enum UsageAggregator {
 
             return (left.expiry ?? .distantPast) > (right.expiry ?? .distantPast)
         }
+        let poolQuotas = quotaSummaries.compactMap(\.poolQuota)
+        let recurringStarts = quotaSummaries.compactMap(\.recurringWindowStart)
+        let recurringEnds = quotaSummaries.compactMap(\.recurringWindowEnd)
+        let poolTotal = poolQuotas.reduce(0) { $0 + $1.total }
+        let poolUsed = poolQuotas.reduce(0) { $0 + $1.used }
+        let poolRemaining = poolQuotas.reduce(0) { $0 + $1.remaining }
+        let poolEnd = recurringEnds.min() ?? poolQuotas.compactMap(\.end).min()
 
-        let weeklyQuotaSubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
-        let weekStarts = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
-        let weekEnds = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
-        let weekWindowStart = weekStarts.min()
-        let weekWindowEnd = weekEnds.max()
-        let overlappingTotalSubscriptions = activeSubscriptions.filter { item in
-            guard weeklyLimit(item) == nil,
-                  totalLimit(item) != nil,
-                  let weekWindowStart,
-                  let weekWindowEnd
-            else {
-                return false
-            }
-            return subscriptionOverlaps(item, windowStart: weekWindowStart, windowEnd: weekWindowEnd)
-        }
-
-        let weeklyTotal = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
-            partial + (weeklyLimit(item) ?? 0)
-        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
-            partial + (totalLimit(item) ?? 0)
-        }
-        let weeklyUsed = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
-            partial + (weeklyLimit(item).map { _ in weeklyUsedAmount(item) } ?? 0)
-        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
-            partial + decimal(item.totalUsedUsd)
-        }
-        let weeklyRemaining = weeklyQuotaSubscriptions.reduce(0.0) { partial, item in
-            let total = weeklyLimit(item) ?? 0
-            let remaining = weeklyRemainingAmountFromAPI(item) ?? max(0, total - weeklyUsedAmount(item))
-            return partial + remaining
-        } + overlappingTotalSubscriptions.reduce(0.0) { partial, item in
-            let total = totalLimit(item) ?? 0
-            return partial + Swift.max(0, total - decimal(item.totalUsedUsd))
-        }
-        let subscriptionsWithTotalLimit = activeSubscriptions.filter { totalLimit($0) != nil }
-
-        let monthlyTotal = subscriptionsWithTotalLimit.reduce(0) { partial, item in
-            partial + (totalLimit(item) ?? 0)
-        }
-        let monthlyUsed = subscriptionsWithTotalLimit.reduce(0) { partial, item in
-            partial + decimal(item.totalUsedUsd)
-        }
+        let totalQuotas = quotaSummaries.compactMap(\.totalQuota)
+        let monthlyTotal = totalQuotas.reduce(0) { $0 + $1.total }
+        let monthlyUsed = totalQuotas.reduce(0) { $0 + $1.used }
         let monthlyRemaining = monthlyTotal > 0 ? max(0, monthlyTotal - monthlyUsed) : nil
         let monthlyPercent = monthlyTotal > 0
             ? max(0, min(100, (monthlyRemaining ?? 0) / monthlyTotal * 100))
@@ -142,6 +100,39 @@ enum UsageAggregator {
 
         let remainingDays = maxEnd.map { end in
             max(0, Int(ceil(end.timeIntervalSince(now) / 86_400)))
+        }
+        let walletBalance = decimal(subscriptionData.creditBalanceUsd) + decimal(subscriptionData.welfareBalanceUsd)
+        let primaryMode: PrimaryDisplayMode
+        let primaryAmount: Double?
+        let primaryTotal: Double?
+        let primaryEnd: Date?
+        if poolTotal > 0 {
+            if poolRemaining > 0 {
+                primaryMode = .quotaPool
+                primaryAmount = poolRemaining
+                primaryTotal = poolTotal
+                primaryEnd = poolEnd
+            } else if walletBalance > 0 {
+                primaryMode = .balance
+                primaryAmount = walletBalance
+                primaryTotal = nil
+                primaryEnd = nil
+            } else {
+                primaryMode = .empty
+                primaryAmount = nil
+                primaryTotal = nil
+                primaryEnd = nil
+            }
+        } else if walletBalance > 0 {
+            primaryMode = .balance
+            primaryAmount = walletBalance
+            primaryTotal = nil
+            primaryEnd = nil
+        } else {
+            primaryMode = .empty
+            primaryAmount = nil
+            primaryTotal = nil
+            primaryEnd = nil
         }
 
         let statsPayload = stats?.data
@@ -156,7 +147,6 @@ enum UsageAggregator {
             }
         } ?? previousSnapshot?.cacheRates ?? []
 
-        let walletBalance = decimal(subscriptionData.creditBalanceUsd) + decimal(subscriptionData.welfareBalanceUsd)
         let trend = statsPayload.map { payload in
             downsample(payload.trend ?? [], maxCount: 32).map { point in
                 UsageTrendPoint(
@@ -171,11 +161,15 @@ enum UsageAggregator {
         let tokens = statsPayload?.totalTokens ?? previousSnapshot?.totalTokens
 
         return UsageSnapshot(
-            weeklyRemaining: weeklyTotal > 0 ? weeklyRemaining : nil,
-            weeklyUsed: weeklyTotal > 0 ? weeklyUsed : nil,
-            weeklyTotal: weeklyTotal > 0 ? weeklyTotal : nil,
-            weekStart: weekStarts.min(),
-            weekEnd: weekEnds.max(),
+            primaryMode: primaryMode,
+            primaryAmount: primaryAmount,
+            primaryTotal: primaryTotal,
+            primaryEnd: primaryEnd,
+            weeklyRemaining: poolTotal > 0 ? poolRemaining : nil,
+            weeklyUsed: poolTotal > 0 ? poolUsed : nil,
+            weeklyTotal: poolTotal > 0 ? poolTotal : nil,
+            weekStart: recurringStarts.min() ?? poolQuotas.compactMap(\.start).min(),
+            weekEnd: poolEnd,
             monthlyRemaining: monthlyRemaining,
             monthlyUsed: monthlyTotal > 0 ? monthlyUsed : nil,
             monthlyTotal: monthlyTotal > 0 ? monthlyTotal : nil,
@@ -217,13 +211,11 @@ enum UsageAggregator {
         now: Date
     ) throws -> StatsRangeContext {
         let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
-        let weeklyQuotaSubscriptions = activeSubscriptions.filter { weeklyLimit($0) != nil }
-        let weekStarts = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
-        let weekEnds = weeklyQuotaSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
-        let monthlySubscriptions = activeSubscriptions.filter { weeklyLimit($0) == nil && totalLimit($0) != nil }
-        let monthlyWindows = monthlySubscriptions.compactMap { currentMonthlyStatsWindow(for: $0, now: now) }
-        let subscriptionStarts = monthlyWindows.map(\.start)
-        let subscriptionEnds = monthlyWindows.map(\.end)
+        let recurringWindowSubscriptions = activeSubscriptions.filter { recurringWindowQuota($0) != nil }
+        let weekStarts = recurringWindowSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
+        let weekEnds = recurringWindowSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let subscriptionStarts = activeSubscriptions.compactMap { APIDateParser.parse($0.subscriptionStartAt) }
+        let subscriptionEnds = activeSubscriptions.compactMap { APIDateParser.parse($0.subscriptionEndAt) }
 
         var available: [StatsRange] = [.today, .last7Days, .last30Days]
         let weekStart = weekStarts.min()
@@ -283,102 +275,123 @@ enum UsageAggregator {
     }
 
     static func weeklyLimit(_ item: SubscriptionItem) -> Double? {
-        let billing = billingType(item)
-        let dailyLimit = decimal(item.quota?.dailyLimitUsd)
-
-        if billing == "usd_monthly" {
-            return nil
-        }
-
-        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
-            return dailyLimit > 0 ? dailyLimit : nil
-        }
-
-        let legacyLimit = dailyLimit + decimal(item.quota?.forwardedLimitUsd)
-        return legacyLimit > 0 ? legacyLimit : nil
+        recurringWindowQuota(item)?.total
     }
 
     static func totalLimit(_ item: SubscriptionItem) -> Double? {
-        let billing = billingType(item)
-        let dailyLimit = decimal(item.quota?.dailyLimitUsd)
-
-        if billing == "usd_monthly" {
-            return dailyLimit > 0 ? dailyLimit : nil
-        }
-
-        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
-            let total = dailyLimit * 4
-            return total > 0 ? total : nil
-        }
-
-        if isMonthlySubscription(item) {
-            let total = dailyLimit * 4
-            return total > 0 ? total : nil
-        }
-
-        return nil
+        totalQuota(item)?.total
     }
 
-    private static func weeklyUsedAmount(_ item: SubscriptionItem) -> Double {
-        let billing = billingType(item)
-        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
-            return decimal(item.quota?.usedUsd)
-        }
-        return decimal(item.quota?.usedUsd) + decimal(item.quota?.forwardedUsedUsd)
+    private static func subscriptionQuotaSummary(for item: SubscriptionItem) -> SubscriptionQuotaSummary {
+        let start = APIDateParser.parse(item.subscriptionStartAt)
+        let expiry = APIDateParser.parse(item.subscriptionEndAt)
+        let recurringQuota = recurringWindowQuota(item)
+        let totalQuota = totalQuota(item)
+        let weeklyQuota = recurringQuota
+        let displayTotalQuota = totalQuota ?? recurringQuota
+
+        let display = SubscriptionDisplayItem(
+            name: item.plan?.name ?? "未命名套餐",
+            start: start,
+            expiry: expiry,
+            weeklyRemaining: weeklyQuota?.remaining,
+            weeklyUsed: weeklyQuota?.used,
+            weeklyTotal: weeklyQuota?.total,
+            weekStart: weeklyQuota?.start,
+            weekEnd: weeklyQuota?.end,
+            monthlyRemaining: displayTotalQuota?.remaining,
+            monthlyTotal: displayTotalQuota?.total
+        )
+
+        return SubscriptionQuotaSummary(
+            displayItem: display,
+            poolQuota: recurringQuota ?? totalQuota,
+            totalQuota: displayTotalQuota,
+            recurringWindowStart: recurringQuota?.start,
+            recurringWindowEnd: recurringQuota?.end
+        )
     }
 
-    private static func weeklyRemainingAmountFromAPI(_ item: SubscriptionItem) -> Double? {
-        guard hasDecimalValue(item.quota?.remainingUsd) else {
-            return nil
-        }
-
-        let billing = billingType(item)
-        if billing == "usd_weekly" || billing.contains("weekly") || billing.contains("week") {
-            return decimal(item.quota?.remainingUsd)
-        }
-        return decimal(item.quota?.remainingUsd) + decimal(item.quota?.forwardedRemainingUsd)
-    }
-
-    private static func isMonthlySubscription(_ item: SubscriptionItem) -> Bool {
-        let duration = item.plan?.durationDays ?? 0
-        let billing = billingType(item)
-        return duration >= 30 || billing.contains("month")
-    }
-
-    private static func subscriptionOverlaps(
-        _ item: SubscriptionItem,
-        windowStart: Date,
-        windowEnd: Date
-    ) -> Bool {
-        guard let start = APIDateParser.parse(item.subscriptionStartAt),
-              let end = APIDateParser.parse(item.subscriptionEndAt)
-        else {
-            return false
-        }
-        return start < windowEnd && windowStart < end
-    }
-
-    private static func currentMonthlyStatsWindow(for item: SubscriptionItem, now: Date) -> (start: Date, end: Date)? {
-        guard let subscriptionStart = APIDateParser.parse(item.subscriptionStartAt),
-              let subscriptionEnd = APIDateParser.parse(item.subscriptionEndAt),
-              subscriptionStart <= now,
-              now < subscriptionEnd
+    private static func recurringWindowQuota(_ item: SubscriptionItem) -> QuotaAmounts? {
+        guard let start = APIDateParser.parse(item.quota?.windowStartAt),
+              let end = APIDateParser.parse(item.quota?.windowResetAt),
+              end > start,
+              (item.plan?.durationDays ?? 0) > 7
         else {
             return nil
         }
 
-        let cycleLength: TimeInterval = 30 * 86_400
-        let elapsed = max(0, now.timeIntervalSince(subscriptionStart))
-        let cycleIndex = floor(elapsed / cycleLength)
-        let cycleStart = subscriptionStart.addingTimeInterval(cycleIndex * cycleLength)
-        let cycleEnd = min(subscriptionEnd, cycleStart.addingTimeInterval(cycleLength))
-        return (cycleStart, cycleEnd)
+        let total = decimal(item.quota?.dailyLimitUsd)
+        guard total > 0 else {
+            return nil
+        }
+
+        let used = decimal(item.quota?.usedUsd)
+        let remaining = hasDecimalValue(item.quota?.remainingUsd)
+            ? decimal(item.quota?.remainingUsd)
+            : max(0, total - used)
+        return QuotaAmounts(
+            remaining: max(0, remaining),
+            used: max(0, used),
+            total: total,
+            start: start,
+            end: end
+        )
     }
 
-    private static func billingType(_ item: SubscriptionItem) -> String {
-        (item.plan?.billingType ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+    private static func totalQuota(_ item: SubscriptionItem) -> QuotaAmounts? {
+        if let recurring = recurringWindowQuota(item) {
+            let total = recurring.total * recurringWindowCount(item)
+            let used = decimal(item.totalUsedUsd)
+            return QuotaAmounts(
+                remaining: max(0, total - used),
+                used: max(0, used),
+                total: total,
+                start: APIDateParser.parse(item.subscriptionStartAt),
+                end: APIDateParser.parse(item.subscriptionEndAt)
+            )
+        }
+
+        let forwardedTotal = decimal(item.quota?.forwardedLimitUsd)
+        if forwardedTotal > 0 {
+            let used = decimal(item.quota?.forwardedUsedUsd)
+            let remaining = hasDecimalValue(item.quota?.forwardedRemainingUsd)
+                ? decimal(item.quota?.forwardedRemainingUsd)
+                : max(0, forwardedTotal - used)
+            return QuotaAmounts(
+                remaining: max(0, remaining),
+                used: max(0, used),
+                total: forwardedTotal,
+                start: APIDateParser.parse(item.subscriptionStartAt),
+                end: APIDateParser.parse(item.subscriptionEndAt)
+            )
+        }
+
+        let total = decimal(item.quota?.dailyLimitUsd)
+        guard total > 0 else {
+            return nil
+        }
+
+        let usedFromQuota = decimal(item.quota?.usedUsd)
+        let used = usedFromQuota > 0 ? usedFromQuota : decimal(item.totalUsedUsd)
+        let remaining = hasDecimalValue(item.quota?.remainingUsd)
+            ? decimal(item.quota?.remainingUsd)
+            : max(0, total - used)
+        return QuotaAmounts(
+            remaining: max(0, remaining),
+            used: max(0, used),
+            total: total,
+            start: APIDateParser.parse(item.subscriptionStartAt),
+            end: APIDateParser.parse(item.subscriptionEndAt)
+        )
+    }
+
+    private static func recurringWindowCount(_ item: SubscriptionItem) -> Double {
+        let durationDays = item.plan?.durationDays ?? 0
+        if durationDays >= 28, durationDays <= 31 {
+            return 4
+        }
+        return max(1, floor(Double(durationDays) / 7))
     }
 
     private static func hasDecimalValue(_ value: String?) -> Bool {

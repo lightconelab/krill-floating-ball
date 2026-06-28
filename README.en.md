@@ -47,7 +47,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Usage statistics ranges: `Quota Week`, `Subscription Period`, `Today`, `7 Days`, and `30 Days`.
 - Spend, requests, and Tokens include sparklines; cache rate is shown per channel.
 - Configurable automatic refresh interval, defaulting to 30 seconds. The next automatic refresh is scheduled after the previous refresh completes.
-- Manual refresh, launch at login, Krill account setup, login clearing, hide/show widget, and quit actions from the menu bar.
+- Manual refresh, launch at login, balance-threshold settings, Krill account setup, login clearing, hide/show widget, and quit actions from the menu bar.
 - Failed refreshes keep the last successful data and show a status badge beside the refresh time without overwriting the last successful refresh timestamp.
 - Krill login credentials are stored in macOS Keychain. API tokens are obtained at runtime through login and are not written to source files or local configuration.
 
@@ -65,19 +65,13 @@ Subscription cards are sorted by remaining total quota from high to low.
 
 ### Subscription Quota
 
-- `plan.billing_type = usd_monthly`: total quota is `quota.daily_limit_usd`, with no separate weekly quota.
-- `plan.billing_type = usd_weekly`: weekly quota is `quota.daily_limit_usd`, and total quota is `quota.daily_limit_usd * 4`.
-- Other subscription types are displayed with best-effort compatibility based on the returned quota fields.
+- The app aggregates currently available quota from active time ranges, quota windows, and returned quota fields.
+- The expanded panel displays each active item as weekly quota, monthly quota, or total quota according to the resolved quota type.
+- Wallet balance is displayed as a separate balance and is not merged into subscription cards.
 
 ### Floating Ball Level
 
-The floating ball represents the current weekly availability pool, not a single subscription:
-
-```text
-Current weekly availability pool =
-active subscriptions with weekly quota +
-other active total-quota subscriptions whose active time range overlaps the current weekly window
-```
+The floating ball represents the current available quota pool, not a single subscription. If the quota pool is exhausted while wallet balance is still available, the ball switches to balance mode.
 
 The liquid level and edge progress bar are based on remaining percentage:
 
@@ -87,6 +81,8 @@ The liquid level and edge progress bar are based on remaining percentage:
 | `> 30%` | Cyan-blue, healthy but worth watching |
 | `> 10%` | Amber, low quota |
 | `<= 10%` | Red, critical quota |
+
+Balance mode has no fixed total-quota denominator, so it does not show a liquid percentage. It uses balance-level colors instead, and the balance thresholds can be adjusted from the menu bar.
 
 ### Usage Statistics
 
@@ -137,7 +133,7 @@ Build outputs are written to `dist/`. `dist/`, `.build/`, and zip files are igno
 2. Enter your Krill AI email and password in the first-launch prompt.
 3. Drag the floating ball to a preferred position.
 4. Hover over the floating ball or edge progress bar to inspect detailed usage.
-5. Use the menu bar to refresh manually, change the automatic refresh interval, enable or disable launch at login, enable or disable edge progress bar mode, clear login information, or quit the app.
+5. Use the menu bar to refresh manually, change the automatic refresh interval, adjust balance thresholds, enable or disable launch at login, enable or disable edge progress bar mode, clear login information, or quit the app.
 
 ## Performance
 

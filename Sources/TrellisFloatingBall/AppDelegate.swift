@@ -66,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let edgeItem = NSMenuItem(title: "贴边进度条", action: #selector(toggleEdgeProgress), keyEquivalent: "")
         edgeProgressMenuItem = edgeItem
         menu.addItem(edgeItem)
+        menu.addItem(NSMenuItem(title: "余额阈值...", action: #selector(setBalanceThresholds), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "恢复余额阈值默认值", action: #selector(resetBalanceThresholds), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "设置 Krill 账号...", action: #selector(setCredentials), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "清除登录信息", action: #selector(clearCredentials), keyEquivalent: ""))
         menu.addItem(.separator())
@@ -117,9 +119,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        let weekly = Formatters.usd(snapshot.weeklyRemaining)
+        let label: String
+        let amount: String
+        switch snapshot.primaryMode {
+        case .quotaPool:
+            label = "额度池"
+            amount = Formatters.usd(snapshot.primaryAmount)
+        case .balance:
+            label = "余额"
+            amount = Formatters.usd(snapshot.primaryAmount ?? snapshot.walletBalance)
+        case .empty:
+            label = snapshot.needsToken ? "未登录" : "无额度"
+            amount = ""
+        }
         let time = Formatters.time(snapshot.lastRefresh)
-        button.toolTip = "周剩余 \(weekly) · 刷新时间 \(time)"
+        button.toolTip = amount.isEmpty
+            ? "\(label) · 刷新时间 \(time)"
+            : "\(label) \(amount) · 刷新时间 \(time)"
     }
 
     @objc private func refreshNow() {
@@ -174,6 +190,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let enabled = EdgeProgressPreference.isEnabled == false
         floatingController.setEdgeProgressEnabled(enabled)
         updateEdgeProgressMenuItem()
+    }
+
+    @objc private func setBalanceThresholds() {
+        NSApp.activate(ignoringOtherApps: true)
+        var current = BalanceThresholds.load()
+
+        while true {
+            let alert = NSAlert()
+            alert.messageText = "设置余额阈值"
+            alert.informativeText = "余额模式颜色固定复用额度水位颜色，只配置金额区间。"
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "保存")
+            alert.addButton(withTitle: "取消")
+
+            let ampleInput = thresholdInput(value: current.ample)
+            let normalInput = thresholdInput(value: current.normal)
+            let lowInput = thresholdInput(value: current.low)
+
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.spacing = 8
+            stack.alignment = .leading
+            stack.addArrangedSubview(thresholdRow(title: "充足 >=", field: ampleInput))
+            stack.addArrangedSubview(thresholdRow(title: "正常 >=", field: normalInput))
+            stack.addArrangedSubview(thresholdRow(title: "偏低 >=", field: lowInput))
+            stack.frame = NSRect(x: 0, y: 0, width: 320, height: 88)
+            alert.accessoryView = stack
+            alert.window.initialFirstResponder = ampleInput
+
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                return
+            }
+
+            guard let ample = parseThreshold(ampleInput.stringValue),
+                  let normal = parseThreshold(normalInput.stringValue),
+                  let low = parseThreshold(lowInput.stringValue)
+            else {
+                showBalanceThresholdValidationAlert("请输入有效的非负数字。")
+                continue
+            }
+
+            let next = BalanceThresholds(ample: ample, normal: normal, low: low)
+            guard next.isValid else {
+                current = next
+                showBalanceThresholdValidationAlert("阈值必须满足：充足 > 正常 > 偏低 >= 0。")
+                continue
+            }
+
+            BalanceThresholds.save(next)
+            floatingController.preferencesDidChange()
+            return
+        }
+    }
+
+    @objc private func resetBalanceThresholds() {
+        BalanceThresholds.reset()
+        floatingController.preferencesDidChange()
     }
 
     @objc private func setCredentials() {
@@ -272,6 +345,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         row.addArrangedSubview(field)
         row.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
         return row
+    }
+
+    private func thresholdRow(title: String, field: NSTextField) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .right
+        label.frame = NSRect(x: 0, y: 0, width: 72, height: 24)
+
+        let prefix = NSTextField(labelWithString: "$")
+        prefix.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        prefix.textColor = .secondaryLabelColor
+        prefix.frame = NSRect(x: 0, y: 0, width: 12, height: 24)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 6
+        row.alignment = .centerY
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(prefix)
+        row.addArrangedSubview(field)
+        row.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        return row
+    }
+
+    private func thresholdInput(value: Double) -> NSTextField {
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        input.stringValue = value.truncatingRemainder(dividingBy: 1) == 0
+            ? String(format: "%.0f", value)
+            : String(format: "%.2f", value)
+        input.usesSingleLineMode = true
+        return input
+    }
+
+    private func parseThreshold(_ value: String) -> Double? {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: ",", with: "")
+        guard let number = Double(normalized), number.isFinite, number >= 0 else {
+            return nil
+        }
+        return number
+    }
+
+    private func showBalanceThresholdValidationAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "余额阈值无效"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "重新输入")
+        alert.runModal()
     }
 
     private func configureCredentialInput(_ field: NSTextField) {
