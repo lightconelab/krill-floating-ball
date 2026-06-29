@@ -26,11 +26,15 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 | --- | --- | --- |
 | <img src="docs/images/edge-progress-overview.png" width="700" alt="Edge progress bar with expanded panel"> | <img src="docs/images/edge-progress-vertical.png" width="90" alt="Vertical edge progress bar"> | <img src="docs/images/edge-progress-horizontal.png" width="240" alt="Horizontal edge progress bar"> |
 
-### Menu Bar And Login
+### Menu Bar And Account
 
-| Menu Icon | Menu Actions | Login Prompt | Missing Account |
-| --- | --- | --- | --- |
-| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="220" alt="Menu actions"> | <img src="docs/images/login-prompt.png" width="360" alt="Krill login prompt"> | <img src="docs/images/missing-login-overview.png" width="520" alt="Missing account state"> |
+| Menu Icon | Menu Actions | Balance Alert Ranges |
+| --- | --- | --- |
+| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> | <img src="docs/images/balance-thresholds.png" width="360" alt="Balance alert range settings"> |
+
+| Krill Account | Missing Account |
+| --- | --- |
+| <img src="docs/images/login-prompt.png" width="520" alt="Krill account prompt"> | <img src="docs/images/missing-login-overview.png" width="720" alt="Missing account state"> |
 
 ### Krill Account Comparison
 
@@ -47,7 +51,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Usage statistics ranges: `Quota Week`, `Subscription Period`, `Today`, `7 Days`, and `30 Days`.
 - Spend, requests, and Tokens include sparklines; cache rate is shown per channel.
 - Configurable automatic refresh interval, defaulting to 30 seconds. The next automatic refresh is scheduled after the previous refresh completes.
-- Manual refresh, launch at login, balance-threshold settings, Krill account setup, login clearing, hide/show widget, and quit actions from the menu bar.
+- Manual refresh, launch at login, balance alert ranges, Krill account management, desktop widget visibility, edge progress bar mode, and quit actions from the menu bar.
 - Failed refreshes keep the last successful data and show a status badge beside the refresh time without overwriting the last successful refresh timestamp.
 - Krill login credentials are stored in macOS Keychain. API tokens are obtained at runtime through login and are not written to source files or local configuration.
 
@@ -61,7 +65,7 @@ Active subscriptions are filtered with:
 active = true && now >= subscription_start_at && now < subscription_end_at
 ```
 
-Subscription cards are sorted by remaining total quota from high to low.
+Subscription cards keep the original `subscriptions` order returned by the `subscription` API after inactive and expired items are filtered out.
 
 ### Subscription Quota
 
@@ -82,7 +86,7 @@ The liquid level and edge progress bar are based on remaining percentage:
 | `> 10%` | Amber, low quota |
 | `<= 10%` | Red, critical quota |
 
-Balance mode has no fixed total-quota denominator, so it does not show a liquid percentage. It uses balance-level colors instead, and the balance thresholds can be adjusted from the menu bar.
+Balance mode has no fixed total-quota denominator, so it does not show a liquid percentage. It uses balance-level colors instead, and the balance alert ranges can be adjusted from the menu bar.
 
 ### Usage Statistics
 
@@ -106,7 +110,7 @@ Usage statistics are read from Krill request-log stats. The main fields are:
 1. Open [GitHub Releases](https://github.com/lightconelab/krill-floating-ball/releases/latest).
 2. Download the latest `Krill-Floating-Ball-v*-macOS-arm64.zip`.
 3. Unzip it and open `Krill Floating Ball.app`.
-4. On first launch, enter your Krill AI email and password, or choose `设置 Krill 账号...` from the menu bar.
+4. On first launch, enter your Krill AI email and password, or choose `Krill 账号` from the menu bar.
 
 The current prebuilt app is ad-hoc signed but not notarized with an Apple Developer ID. If macOS blocks the first launch, right-click the app and choose `Open`, or allow it in `System Settings -> Privacy & Security`.
 
@@ -133,7 +137,7 @@ Build outputs are written to `dist/`. `dist/`, `.build/`, and zip files are igno
 2. Enter your Krill AI email and password in the first-launch prompt.
 3. Drag the floating ball to a preferred position.
 4. Hover over the floating ball or edge progress bar to inspect detailed usage.
-5. Use the menu bar to refresh manually, change the automatic refresh interval, adjust balance thresholds, enable or disable launch at login, enable or disable edge progress bar mode, clear login information, or quit the app.
+5. Use the menu bar to refresh manually, show or hide the desktop widget, enable or disable edge progress bar mode, change the automatic refresh interval, adjust balance alert ranges, enable or disable launch at login, manage the Krill account, or quit the app.
 
 ## Performance
 

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.2.7 - 2026-06-29
+
+- Added a lightweight `_kfp` fingerprint cookie generated locally for Krill login requests, keeping data fetching on direct HTTP requests without WebKit, Safari, or JavaScriptCore.
+- Reorganized the menu bar actions into clearer groups, renamed account and balance controls, merged the floating ball show/hide actions into one checked menu item, and moved credential clearing into the Krill account dialog.
+- Added the balance alert range dialog to the public screenshots and moved "restore default" into that dialog.
+- Fixed the menu bar capture-ball icon so the divider line no longer crosses the central `K` button.
+- Fixed clearing login information so the floating ball and expanded panel immediately reset to a clean missing-account state instead of retaining stale quota, wallet, usage, cache, or subscription data.
+- Changed active subscription cards to preserve the `subscription` API response order after active-time filtering.
+- Refreshed Chinese and English README screenshots and updated the documented menu labels, account flow, balance alert wording, and subscription ordering rules.
+- Simplified recently touched code paths around empty-state labels, HTTP status validation, stat-card drawing, and unused widget callbacks while preserving behavior.
+
 ## v0.2.6 - 2026-06-25
 
 - Switched the public setup flow to Krill email/password login stored in macOS Keychain, with runtime API tokens kept in memory only.

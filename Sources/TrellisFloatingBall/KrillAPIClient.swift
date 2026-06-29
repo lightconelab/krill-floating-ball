@@ -1,11 +1,13 @@
 import Darwin
 import Foundation
+import Security
 
 enum KrillAPIError: LocalizedError {
     case invalidResponse
     case badStatus(Int)
     case missingData
     case unauthorized
+    case edgeRejected(Int)
     case apiError(Int?, String?)
     case loginFailed(String?)
 
@@ -19,6 +21,8 @@ enum KrillAPIError: LocalizedError {
             return "接口响应缺少 data 字段"
         case .unauthorized:
             return "登录已失效，正在尝试重新登录"
+        case .edgeRejected(let status):
+            return "接口请求被边缘层拒绝（HTTP \(status)）"
         case .apiError(let code, let message):
             if let message, message.isEmpty == false {
                 return message
@@ -42,10 +46,11 @@ struct APIBundle {
     let statsRangeContext: StatsRangeContext
 }
 
-struct KrillAPIClient {
+final class KrillAPIClient: @unchecked Sendable {
     fileprivate enum Network {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
+        static let retryDelayNanoseconds: UInt64 = 350_000_000
         static let sampledTrendLimit = 32
         static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
         static let statsChunkLength: TimeInterval = 7 * 86_400
@@ -54,7 +59,19 @@ struct KrillAPIClient {
     private let loginURL = URL(string: "https://www.krill-ai.com/api/auth/login")!
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
-    private func makeSession() -> URLSession {
+    private let session: URLSession
+    private let fingerprintStore: KrillFingerprintStore
+
+    init(session: URLSession? = nil, fingerprintStore: KrillFingerprintStore = .shared) {
+        self.session = session ?? URLSession(configuration: Self.makeSessionConfiguration())
+        self.fingerprintStore = fingerprintStore
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
+
+    private static func makeSessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
@@ -65,7 +82,7 @@ struct KrillAPIClient {
         configuration.timeoutIntervalForRequest = Network.requestTimeout
         configuration.timeoutIntervalForResource = Network.resourceTimeout
         configuration.httpMaximumConnectionsPerHost = 2
-        return URLSession(configuration: configuration)
+        return configuration
     }
 
     func login(credentials: KrillCredentials) async throws -> String {
@@ -73,20 +90,16 @@ struct KrillAPIClient {
         request.httpMethod = "POST"
         request.timeoutInterval = Network.requestTimeout
         applyLoginHeaders(to: &request)
+        applyBrowserFetchHeaders(to: &request, referer: "https://www.krill-ai.com/login")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
-        request.setValue("https://www.krill-ai.com/login", forHTTPHeaderField: "referer")
         request.httpBody = try JSONEncoder().encode(LoginRequestPayload(
             email: credentials.email,
             password: credentials.password
         ))
 
         let (data, response) = try await loadData(for: request)
-        do {
-            try validate(response)
-        } catch KrillAPIError.unauthorized {
-            throw KrillAPIError.loginFailed(nil)
-        }
+        try validateLoginResponse(response, data: data)
         return try extractLoginToken(from: data)
     }
 
@@ -95,9 +108,10 @@ struct KrillAPIClient {
         request.httpMethod = "GET"
         request.timeoutInterval = Network.requestTimeout
         applyCommonHeaders(to: &request, token: token)
+        request.setValue("https://www.krill-ai.com/app/profile", forHTTPHeaderField: "referer")
 
         let (data, response) = try await loadData(for: request)
-        try validate(response)
+        try validate(response, data: data, allowUnauthorized: true)
         let envelope = try decode(SubscriptionEnvelope.self, from: data)
         try validateAPIStatus(success: envelope.success, code: envelope.code, message: envelope.message)
         return envelope
@@ -120,6 +134,7 @@ struct KrillAPIClient {
         request.httpMethod = "POST"
         request.timeoutInterval = Network.resourceTimeout
         applyCommonHeaders(to: &request, token: token)
+        request.setValue("https://www.krill-ai.com/app/activity", forHTTPHeaderField: "referer")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
 
@@ -133,7 +148,7 @@ struct KrillAPIClient {
         defer {
             try? FileManager.default.removeItem(at: fileURL)
         }
-        try validate(response)
+        try validate(response, dataURL: fileURL, allowUnauthorized: true)
         let envelope = try StatsJSONParser.decodeEnvelope(from: fileURL, trendLimit: Network.sampledTrendLimit)
         try validateAPIStatus(success: envelope.success, code: envelope.code, message: envelope.message)
         return envelope
@@ -172,61 +187,123 @@ struct KrillAPIClient {
     }
 
     private func loadData(for request: URLRequest) async throws -> (Data, URLResponse) {
-        let session = makeSession()
-        do {
-            let result = try await session.data(for: request)
-            session.invalidateAndCancel()
-            return result
-        } catch {
-            session.invalidateAndCancel()
-            throw error
+        try await withTransientNetworkRetry {
+            try await self.session.data(for: request)
         }
     }
 
     private func downloadFile(for request: URLRequest) async throws -> (URL, URLResponse) {
-        let session = makeSession()
-        do {
-            let (temporaryURL, response) = try await session.download(for: request)
+        try await withTransientNetworkRetry {
+            let (temporaryURL, response) = try await self.session.download(for: request)
             let destination = FileManager.default.temporaryDirectory
                 .appendingPathComponent("krill-stats-\(UUID().uuidString).json")
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
-            session.invalidateAndCancel()
             return (destination, response)
-        } catch {
-            session.invalidateAndCancel()
-            throw error
         }
     }
 
     private func applyCommonHeaders(to request: inout URLRequest, token: String) {
         applyLoginHeaders(to: &request)
-        request.setValue("https://www.krill-ai.com/app", forHTTPHeaderField: "referer")
+        applyBrowserFetchHeaders(to: &request, referer: "https://www.krill-ai.com/app")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
     }
 
     private func applyLoginHeaders(to request: inout URLRequest) {
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "accept")
         request.setValue("zh", forHTTPHeaderField: "accept-language")
-        request.setValue("zh", forHTTPHeaderField: "x-language")
-        request.setValue(
-            "KrillFloatingBall/1.0 (macOS)",
-            forHTTPHeaderField: "user-agent"
+        request.setValue("zh", forHTTPHeaderField: "X-Language")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
+        request.setValue("_kfp=\(fingerprintStore.value())", forHTTPHeaderField: "cookie")
+    }
+
+    private func applyBrowserFetchHeaders(to request: inout URLRequest, referer: String) {
+        request.setValue(referer, forHTTPHeaderField: "referer")
+        request.setValue("no-cache", forHTTPHeaderField: "cache-control")
+        request.setValue("1", forHTTPHeaderField: "dnt")
+        request.setValue("1", forHTTPHeaderField: "sec-gpc")
+        request.setValue("\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"", forHTTPHeaderField: "sec-ch-ua")
+        request.setValue("?0", forHTTPHeaderField: "sec-ch-ua-mobile")
+        request.setValue("\"macOS\"", forHTTPHeaderField: "sec-ch-ua-platform")
+        request.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
+        request.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
+        request.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
+        request.setValue("u=1, i", forHTTPHeaderField: "priority")
+    }
+
+    private func validateLoginResponse(_ response: URLResponse, data: Data) throws {
+        try validateHTTPStatus(
+            response,
+            jsonUnauthorized: responseLooksLikeJSON(response, data: data),
+            onJSONUnauthorized: .allowLoginParsing
         )
     }
 
-    private func validate(_ response: URLResponse) throws {
+    private func validate(_ response: URLResponse, data: Data, allowUnauthorized: Bool) throws {
+        try validateHTTPStatus(
+            response,
+            jsonUnauthorized: allowUnauthorized && responseLooksLikeJSON(response, data: data),
+            onJSONUnauthorized: .throwUnauthorized
+        )
+    }
+
+    private func validate(_ response: URLResponse, dataURL: URL, allowUnauthorized: Bool) throws {
+        try validateHTTPStatus(
+            response,
+            jsonUnauthorized: allowUnauthorized && responseLooksLikeJSON(response, dataURL: dataURL),
+            onJSONUnauthorized: .throwUnauthorized
+        )
+    }
+
+    private enum JSONUnauthorizedHandling {
+        case allowLoginParsing
+        case throwUnauthorized
+    }
+
+    private func validateHTTPStatus(
+        _ response: URLResponse,
+        jsonUnauthorized: @autoclosure () -> Bool,
+        onJSONUnauthorized handling: JSONUnauthorizedHandling
+    ) throws {
         guard let http = response as? HTTPURLResponse else {
             throw KrillAPIError.invalidResponse
         }
 
         if http.statusCode == 401 {
-            throw KrillAPIError.unauthorized
+            switch handling {
+            case .allowLoginParsing where jsonUnauthorized():
+                return
+            case .throwUnauthorized where jsonUnauthorized():
+                throw KrillAPIError.unauthorized
+            default:
+                throw KrillAPIError.edgeRejected(http.statusCode)
+            }
         }
 
         guard (200..<300).contains(http.statusCode) else {
             throw KrillAPIError.badStatus(http.statusCode)
         }
+    }
+
+    private func responseLooksLikeJSON(_ response: URLResponse, data: Data) -> Bool {
+        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type")
+        return responseLooksLikeJSON(contentType: contentType, data: data)
+    }
+
+    private func responseLooksLikeJSON(_ response: URLResponse, dataURL: URL) -> Bool {
+        guard let data = try? Data(contentsOf: dataURL, options: [.mappedIfSafe]) else {
+            return false
+        }
+        return responseLooksLikeJSON(response, data: data)
+    }
+
+    private func responseLooksLikeJSON(contentType: String?, data: Data) -> Bool {
+        if contentType?.localizedCaseInsensitiveContains("json") == true {
+            return true
+        }
+        return data.first { byte in
+            byte != 9 && byte != 10 && byte != 13 && byte != 32
+        } == UInt8(ascii: "{")
     }
 
     private func validateAPIStatus(success: Bool?, code: Int?, message: String?) throws {
@@ -327,6 +404,38 @@ struct KrillAPIClient {
         return nil
     }
 
+    private func withTransientNetworkRetry<T>(_ operation: () async throws -> T) async throws -> T {
+        do {
+            return try await operation()
+        } catch {
+            guard isTransientNetworkError(error) else {
+                throw error
+            }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: Network.retryDelayNanoseconds)
+            return try await operation()
+        }
+    }
+
+    private func isTransientNetworkError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else {
+            return false
+        }
+
+        switch urlError.code {
+        case .timedOut,
+             .networkConnectionLost,
+             .cannotFindHost,
+             .cannotConnectToHost,
+             .dnsLookupFailed,
+             .notConnectedToInternet,
+             .secureConnectionFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         try autoreleasepool {
             try JSONDecoder().decode(type, from: data)
@@ -336,6 +445,52 @@ struct KrillAPIClient {
     @discardableResult
     private func releaseUnusedHeapMemory() -> Int {
         malloc_zone_pressure_relief(nil, 0)
+    }
+}
+
+final class KrillFingerprintStore: @unchecked Sendable {
+    static let shared = KrillFingerprintStore()
+
+    private enum Defaults {
+        static let key = "krillFingerprintCookie"
+        static let byteCount = 16
+    }
+
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func value() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let saved = defaults.string(forKey: Defaults.key),
+           Self.isValid(saved) {
+            return saved
+        }
+
+        let generated = Self.generate()
+        defaults.set(generated, forKey: Defaults.key)
+        return generated
+    }
+
+    private static func isValid(_ value: String) -> Bool {
+        value.count == Defaults.byteCount * 2
+            && value.allSatisfy { character in
+                character.isHexDigit
+            }
+    }
+
+    private static func generate() -> String {
+        var bytes = [UInt8](repeating: 0, count: Defaults.byteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status == errSecSuccess {
+            return bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 }
 

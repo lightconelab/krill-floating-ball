@@ -17,7 +17,6 @@ final class UsageWidgetView: NSView {
         case vertical
     }
 
-    var refreshAction: (() -> Void)?
     var expansionChanged: ((Bool) -> Void)?
     var dragBeganAction: (() -> Void)?
     var dragUpdatedAction: ((NSRect) -> NSRect)?
@@ -436,7 +435,7 @@ final class UsageWidgetView: NSView {
         }
 
         let percent = CGFloat(max(0, min(100, percentValue)) / 100)
-        let liquidColor = liquidColor(for: percentValue)
+        let liquidColor = quotaColor(for: percentValue)
         let critical = percentValue <= 10
         let warning = percentValue <= 30
         let pulse = 0.55 + 0.45 * max(0, sin(animationPhase * (critical ? 5.4 : 2.8)))
@@ -575,7 +574,7 @@ final class UsageWidgetView: NSView {
             amount = Formatters.usd(snapshot.primaryAmount ?? snapshot.walletBalance)
             subtitle = "余额"
         case .empty:
-            amount = snapshot.needsToken ? "未登录" : "无额度"
+            amount = snapshot.emptyDisplayText
             subtitle = nil
         }
 
@@ -666,10 +665,6 @@ final class UsageWidgetView: NSView {
         }
     }
 
-    private func liquidColor(for percent: Double?) -> NSColor {
-        quotaColor(for: percent)
-    }
-
     private func drawExpandedPanel(progress: CGFloat) {
         let state = QuotaState(percent: snapshot.primaryPercent)
         let height = currentPanelHeight()
@@ -726,7 +721,6 @@ final class UsageWidgetView: NSView {
         let tint: NSColor
         let trend: StatTrendKind?
         let style: StatCardStyle
-        let showsIcon: Bool
     }
 
     private func drawStatsSummary(in rect: NSRect, state: QuotaState, alpha: CGFloat) {
@@ -780,8 +774,7 @@ final class UsageWidgetView: NSView {
                 icon: .spending,
                 tint: NSColor(hex: 0x1A56DB),
                 trend: .cost,
-                style: .inlineTrend,
-                showsIcon: true
+                style: .inlineTrend
             ),
             StatCardContent(
                 title: "请求数",
@@ -789,8 +782,7 @@ final class UsageWidgetView: NSView {
                 icon: .requests,
                 tint: NSColor(hex: 0x7C3AED),
                 trend: .requests,
-                style: .inlineTrend,
-                showsIcon: true
+                style: .inlineTrend
             ),
             StatCardContent(
                 title: "Tokens",
@@ -798,8 +790,7 @@ final class UsageWidgetView: NSView {
                 icon: .tokens,
                 tint: NSColor(hex: 0xEA580C),
                 trend: .tokens,
-                style: .inlineTrend,
-                showsIcon: true
+                style: .inlineTrend
             ),
             StatCardContent(
                 title: "缓存率",
@@ -807,8 +798,7 @@ final class UsageWidgetView: NSView {
                 icon: .cache,
                 tint: NSColor(hex: 0x0D9F6E),
                 trend: nil,
-                style: .cacheBars,
-                showsIcon: true
+                style: .cacheBars
             ),
             StatCardContent(
                 title: "钱包余额",
@@ -816,8 +806,7 @@ final class UsageWidgetView: NSView {
                 icon: .wallet,
                 tint: NSColor(hex: 0x64748B),
                 trend: nil,
-                style: .centeredValue,
-                showsIcon: true
+                style: .centeredValue
             )
         ]
 
@@ -855,30 +844,15 @@ final class UsageWidgetView: NSView {
         card.stroke()
 
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let iconRect: NSRect?
-        switch content.style {
-        case .inlineTrend:
-            let titleWidth = measuredWidth(content.title, font: titleFont)
-            let headerWidth = min(rect.width - 12, 22 + 6 + titleWidth)
-            iconRect = content.showsIcon ? NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 9, width: 22, height: 22) : nil
-        case .cacheBars, .centeredValue:
-            let titleWidth = measuredWidth(content.title, font: titleFont)
-            let headerWidth = min(rect.width - 12, 22 + 6 + titleWidth)
-            iconRect = content.showsIcon ? NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 9, width: 22, height: 22) : nil
-        }
+        let measuredTitleWidth = measuredWidth(content.title, font: titleFont)
+        let titleWidth = measuredTitleWidth + 2
+        let headerWidth = min(rect.width - 12, 22 + 6 + measuredTitleWidth)
+        let iconRect = NSRect(x: rect.midX - headerWidth / 2, y: rect.minY + 9, width: 22, height: 22)
+        let titleRect = NSRect(x: iconRect.maxX + 6, y: rect.minY + 13, width: titleWidth, height: 14)
 
-        let titleRect: NSRect
         let valueRect: NSRect
         switch content.style {
         case .inlineTrend:
-            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
-            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
-            titleRect = NSRect(
-                x: titleX,
-                y: rect.minY + 13,
-                width: titleWidth,
-                height: 14
-            )
             valueRect = NSRect(
                 x: rect.minX + 8,
                 y: rect.maxY - 24,
@@ -886,17 +860,11 @@ final class UsageWidgetView: NSView {
                 height: 17
             )
         case .cacheBars:
-            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
-            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
-            titleRect = NSRect(x: titleX, y: rect.minY + 13, width: titleWidth, height: 14)
             valueRect = NSRect(x: rect.minX + 6, y: rect.minY + 43, width: rect.width - 12, height: 22)
         case .centeredValue:
-            let titleWidth = measuredWidth(content.title, font: titleFont) + 2
-            let titleX = iconRect.map { $0.maxX + 6 } ?? rect.midX - titleWidth / 2
             let lowerTop = rect.minY + 36
             let valueHeight: CGFloat = 22
             let lowerHeight = max(valueHeight, rect.maxY - lowerTop - 8)
-            titleRect = NSRect(x: titleX, y: rect.minY + 13, width: titleWidth, height: 14)
             valueRect = NSRect(
                 x: rect.minX + 6,
                 y: lowerTop + (lowerHeight - valueHeight) / 2,
@@ -905,12 +873,10 @@ final class UsageWidgetView: NSView {
             )
         }
 
-        if let iconRect {
-            content.tint.blended(withFraction: 0.90, of: .white)?.withAlphaComponent(alpha).setFill()
-            NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
-            let iconInset = min(4.8, iconRect.width * 0.22)
-            drawStatIcon(content.icon, in: iconRect.insetBy(dx: iconInset, dy: iconInset), tint: content.tint, alpha: alpha)
-        }
+        content.tint.blended(withFraction: 0.90, of: .white)?.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
+        let iconInset = min(4.8, iconRect.width * 0.22)
+        drawStatIcon(content.icon, in: iconRect.insetBy(dx: iconInset, dy: iconInset), tint: content.tint, alpha: alpha)
 
         drawText(
             content.title,
@@ -952,7 +918,11 @@ final class UsageWidgetView: NSView {
 
     private func drawStatsStatus(in content: NSRect, refreshRect: NSRect, rangeStartX: CGFloat, alpha: CGFloat) {
         let status: (text: String, color: NSColor)?
-        if snapshot.isLoading {
+        if snapshot.needsToken, snapshot.lastError?.contains("登录失败") == true {
+            status = ("登录失败", NSColor(hex: 0xE02D3C))
+        } else if snapshot.needsToken {
+            status = ("未登录", NSColor(hex: 0xD97706))
+        } else if snapshot.isLoading {
             status = ("更新中", NSColor(hex: 0x1A56DB))
         } else if snapshot.lastError != nil {
             status = ("获取失败", NSColor(hex: 0xE02D3C))

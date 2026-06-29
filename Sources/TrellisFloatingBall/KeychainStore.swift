@@ -60,6 +60,17 @@ final class KeychainStore {
         return credentials
     }
 
+    func cachedCredentialsIfLoaded() -> KrillCredentials? {
+        guard didLoadCredentials else {
+            return nil
+        }
+        return cachedCredentials
+    }
+
+    func hasStoredCredentials() -> Bool {
+        hasStoredData(account: Accounts.credentials)
+    }
+
     func saveCredentials(_ credentials: KrillCredentials) throws {
         let normalized = KrillCredentials(
             email: credentials.email.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -92,13 +103,11 @@ final class KeychainStore {
     }
 
     private func loadData(account: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+        var query = keychainQuery(account: account)
+        query.merge([
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
-        ]
+        ]) { _, new in new }
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -107,6 +116,18 @@ final class KeychainStore {
         }
 
         return result as? Data
+    }
+
+    private func hasStoredData(account: String) -> Bool {
+        var query = keychainQuery(account: account)
+        query.merge([
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]) { _, new in new }
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return status == errSecSuccess
     }
 
     private func saveData(_ data: Data, account: String) throws {

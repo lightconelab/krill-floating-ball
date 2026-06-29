@@ -83,6 +83,9 @@ final class UsageStore {
     func credentialsDidChangeAndRefreshNow() {
         cachedToken = nil
         cancelCurrentRefreshForImmediateReplacement()
+        if keychain.hasStoredCredentials() == false {
+            selectedStatsRange = .today
+        }
         refresh(manual: true)
     }
 

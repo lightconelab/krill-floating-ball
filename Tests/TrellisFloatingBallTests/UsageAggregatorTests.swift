@@ -4,6 +4,58 @@ import XCTest
 
 @MainActor
 final class UsageAggregatorTests: XCTestCase {
+    func testMissingCredentialsClearsStaleUsageData() {
+        var previous = UsageSnapshot.placeholder
+        previous.primaryMode = .quotaPool
+        previous.primaryAmount = 10
+        previous.primaryTotal = 20
+        previous.weeklyRemaining = 10
+        previous.weeklyTotal = 20
+        previous.monthlyRemaining = 30
+        previous.monthlyTotal = 40
+        previous.todayCost = 12.3
+        previous.walletBalance = 53
+        previous.requestCount = 99
+        previous.totalTokens = 1_000
+        previous.trend = [UsageTrendPoint(cost: 1, requestCount: 2, tokens: 3)]
+        previous.cacheRates = [CacheRate(name: "Openai 官渠", percent: 91)]
+        previous.subscriptions = [
+            SubscriptionDisplayItem(
+                name: "轻享月卡",
+                start: nil,
+                expiry: nil,
+                weeklyRemaining: 10,
+                weeklyUsed: 10,
+                weeklyTotal: 20,
+                weekStart: nil,
+                weekEnd: nil,
+                monthlyRemaining: 30,
+                monthlyTotal: 40
+            )
+        ]
+        previous.lastRefresh = Date()
+        previous.needsToken = false
+
+        let snapshot = UsageSnapshot.missingCredentials(previous: previous)
+
+        XCTAssertEqual(snapshot.primaryMode, .empty)
+        XCTAssertTrue(snapshot.needsToken)
+        XCTAssertFalse(snapshot.isLoading)
+        XCTAssertNil(snapshot.primaryAmount)
+        XCTAssertNil(snapshot.weeklyRemaining)
+        XCTAssertNil(snapshot.monthlyRemaining)
+        XCTAssertNil(snapshot.todayCost)
+        XCTAssertNil(snapshot.walletBalance)
+        XCTAssertNil(snapshot.requestCount)
+        XCTAssertNil(snapshot.totalTokens)
+        XCTAssertTrue(snapshot.trend.isEmpty)
+        XCTAssertTrue(snapshot.cacheRates.isEmpty)
+        XCTAssertTrue(snapshot.subscriptions.isEmpty)
+        XCTAssertNil(snapshot.lastRefresh)
+        XCTAssertEqual(snapshot.statsRange, .today)
+        XCTAssertEqual(snapshot.availableStatsRanges, [.today, .last7Days, .last30Days])
+    }
+
     func testQuotaPoolSeparatesRecurringWindowAndOneShotTotals() throws {
         let subscription = try decodeSubscription(sampleSubscriptionJSON)
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-27T12:00:00Z"))

@@ -61,14 +61,12 @@ final class FloatingBallController {
     private var dragStartFrame: NSRect?
     private var isApplyingFrame = false
     private var latestSnapshot = UsageSnapshot.placeholder
+    private var requestedVisible = false
 
     init(store: UsageStore) {
         self.store = store
         self.ballView = UsageWidgetView(frame: NSRect(origin: .zero, size: Layout.collapsedSize), displayMode: .ball)
 
-        ballView.refreshAction = { [weak store] in
-            store?.refresh(manual: true)
-        }
         ballView.expansionChanged = { [weak self] expanded in
             self?.setExpanded(expanded)
         }
@@ -83,7 +81,12 @@ final class FloatingBallController {
         }
     }
 
+    var isVisible: Bool {
+        requestedVisible
+    }
+
     func show() {
+        requestedVisible = true
         collapsePanel(animated: false)
         if window.isVisible == false {
             attachedEdge = nil
@@ -101,6 +104,7 @@ final class FloatingBallController {
     }
 
     func hide() {
+        requestedVisible = false
         collapsePanel(animated: false)
         ballView.setAnimationActive(false)
         window.orderOut(nil)
@@ -108,12 +112,13 @@ final class FloatingBallController {
     }
 
     func temporarilyHideForModal() -> Bool {
-        let wasVisible = window.isVisible
-        collapsePanel(animated: false)
-        guard wasVisible else {
+        guard requestedVisible,
+              window.isVisible
+        else {
             return false
         }
 
+        collapsePanel(animated: false)
         ballView.setAnimationActive(false)
         window.orderOut(nil)
         removeWindowObservers()

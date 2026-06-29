@@ -8,10 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private lazy var usageStore = UsageStore(keychain: keychain)
     private lazy var floatingController = FloatingBallController(store: usageStore)
+    private let credentialValidationClient = KrillAPIClient()
     private var statusItem: NSStatusItem?
     private var refreshIntervalMenuItem: NSMenuItem?
     private var launchAtLoginMenuItem: NSMenuItem?
     private var edgeProgressMenuItem: NSMenuItem?
+    private var floatingBallMenuItem: NSMenuItem?
+    private var didPromptForCredentialFailure = false
+    private var credentialsWindowController: CredentialsWindowController?
+    private var credentialValidationTask: Task<Void, Never>?
 
     private enum CredentialsPromptContext {
         case initialLaunch
@@ -24,11 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
 
         usageStore.onSnapshotChange = { [weak self] snapshot in
-            self?.floatingController.update(snapshot: snapshot)
-            self?.updateStatusTooltip(snapshot)
+            guard let self else {
+                return
+            }
+            floatingController.update(snapshot: snapshot)
+            updateStatusTooltip(snapshot)
+            promptForCredentialsIfNeeded(snapshot)
         }
 
-        let hasCredentials = keychain.loadCredentials() != nil
+        let hasCredentials = keychain.hasStoredCredentials()
         if hasCredentials {
             floatingController.show()
         }
@@ -42,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        credentialValidationTask?.cancel()
         usageStore.stop()
     }
 
@@ -57,22 +67,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "立即刷新", action: #selector(refreshNow), keyEquivalent: "r"))
-        let intervalItem = NSMenuItem(title: refreshIntervalTitle(), action: #selector(setRefreshInterval), keyEquivalent: "i")
-        refreshIntervalMenuItem = intervalItem
-        menu.addItem(intervalItem)
-        let launchItem = NSMenuItem(title: LaunchAtLoginController.menuTitle(), action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-        launchAtLoginMenuItem = launchItem
-        menu.addItem(launchItem)
+
+        menu.addItem(.separator())
+        let floatingItem = NSMenuItem(title: "桌面悬浮球", action: #selector(toggleFloatingBall), keyEquivalent: "s")
+        floatingBallMenuItem = floatingItem
+        menu.addItem(floatingItem)
         let edgeItem = NSMenuItem(title: "贴边进度条", action: #selector(toggleEdgeProgress), keyEquivalent: "")
         edgeProgressMenuItem = edgeItem
         menu.addItem(edgeItem)
-        menu.addItem(NSMenuItem(title: "余额阈值...", action: #selector(setBalanceThresholds), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "恢复余额阈值默认值", action: #selector(resetBalanceThresholds), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "设置 Krill 账号...", action: #selector(setCredentials), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "清除登录信息", action: #selector(clearCredentials), keyEquivalent: ""))
+
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "显示悬浮球", action: #selector(showFloatingBall), keyEquivalent: "s"))
-        menu.addItem(NSMenuItem(title: "隐藏悬浮球", action: #selector(hideFloatingBall), keyEquivalent: "h"))
+        let intervalItem = NSMenuItem(title: refreshIntervalTitle(), action: #selector(setRefreshInterval), keyEquivalent: "i")
+        refreshIntervalMenuItem = intervalItem
+        menu.addItem(intervalItem)
+        menu.addItem(NSMenuItem(title: "余额提醒区间", action: #selector(setBalanceThresholds), keyEquivalent: ""))
+        let launchItem = NSMenuItem(title: LaunchAtLoginController.menuTitle(), action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchAtLoginMenuItem = launchItem
+        menu.addItem(launchItem)
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Krill 账号", action: #selector(setCredentials), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
 
@@ -110,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        updateFloatingBallMenuItem()
         updateLaunchAtLoginMenuItem()
         updateEdgeProgressMenuItem()
     }
@@ -129,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             label = "余额"
             amount = Formatters.usd(snapshot.primaryAmount ?? snapshot.walletBalance)
         case .empty:
-            label = snapshot.needsToken ? "未登录" : "无额度"
+            label = snapshot.emptyDisplayText
             amount = ""
         }
         let time = Formatters.time(snapshot.lastRefresh)
@@ -194,14 +209,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func setBalanceThresholds() {
         NSApp.activate(ignoringOtherApps: true)
+        let shouldRestoreFloating = floatingController.temporarilyHideForModal()
+        defer {
+            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
+        }
+
         var current = BalanceThresholds.load()
 
         while true {
             let alert = NSAlert()
-            alert.messageText = "设置余额阈值"
+            alert.messageText = "设置余额提醒区间"
             alert.informativeText = "余额模式颜色固定复用额度水位颜色，只配置金额区间。"
             alert.alertStyle = .informational
             alert.addButton(withTitle: "保存")
+            alert.addButton(withTitle: "恢复默认")
             alert.addButton(withTitle: "取消")
 
             let ampleInput = thresholdInput(value: current.ample)
@@ -219,7 +240,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.accessoryView = stack
             alert.window.initialFirstResponder = ampleInput
 
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn {
+                BalanceThresholds.reset()
+                floatingController.preferencesDidChange()
+                return
+            }
+            guard response == .alertFirstButtonReturn else {
                 return
             }
 
@@ -244,107 +271,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func resetBalanceThresholds() {
-        BalanceThresholds.reset()
-        floatingController.preferencesDidChange()
-    }
-
     @objc private func setCredentials() {
         promptForCredentials(context: .menuAction)
     }
 
-    @objc private func clearCredentials() {
+    private func clearCredentialsAndRefresh() {
+        didPromptForCredentialFailure = false
+        credentialValidationTask?.cancel()
+        credentialValidationTask = nil
         keychain.deleteCredentials()
         usageStore.credentialsDidChangeAndRefreshNow()
     }
 
-    @objc private func showFloatingBall() {
-        floatingController.show()
-    }
-
-    @objc private func hideFloatingBall() {
-        floatingController.hide()
+    @objc private func toggleFloatingBall() {
+        if floatingController.isVisible {
+            floatingController.hide()
+        } else {
+            floatingController.show()
+        }
+        updateFloatingBallMenuItem()
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 
-    private func promptForCredentials(context: CredentialsPromptContext) {
+    private func promptForCredentials(context: CredentialsPromptContext, initialError: String? = nil) {
         NSApp.activate(ignoringOtherApps: true)
+
+        if let credentialsWindowController {
+            credentialsWindowController.reveal()
+            if let initialError {
+                credentialsWindowController.showError(initialError)
+            }
+            return
+        }
+
         let shouldRestoreFloating = floatingController.temporarilyHideForModal()
 
-        let existing = keychain.loadCredentials()
-        let alert = NSAlert()
-        alert.messageText = "设置 Krill 登录账号"
-        alert.informativeText = "请输入 Krill AI 的邮箱和密码。凭据会保存到 macOS Keychain，源码和配置文件不会保存该信息。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "登录并刷新")
-        alert.addButton(withTitle: "取消")
+        let existing = keychain.cachedCredentialsIfLoaded()
+        let controller = CredentialsWindowController(
+            existing: existing,
+            canClearCredentials: keychain.hasStoredCredentials()
+        )
+        credentialsWindowController = controller
 
-        let emailInput = ShortcutTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        emailInput.placeholderString = "邮箱"
-        emailInput.stringValue = existing?.email ?? ""
-        configureCredentialInput(emailInput)
-
-        let passwordInput = ShortcutSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        passwordInput.placeholderString = existing == nil ? "密码" : "留空则保留原密码"
-        configureCredentialInput(passwordInput)
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 8
-        stack.alignment = .leading
-        stack.addArrangedSubview(labeledField(title: "邮箱", field: emailInput))
-        stack.addArrangedSubview(labeledField(title: "密码", field: passwordInput))
-        stack.frame = NSRect(x: 0, y: 0, width: 420, height: 64)
-        alert.accessoryView = stack
-        alert.window.initialFirstResponder = existing?.email.isEmpty == false ? passwordInput : emailInput
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
-            return
-        }
-
-        let email = emailInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = passwordInput.stringValue.isEmpty
-            ? (existing?.password ?? "")
-            : passwordInput.stringValue
-        guard email.isEmpty == false, password.isEmpty == false else {
-            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
-            return
-        }
-
-        do {
-            try keychain.saveCredentials(KrillCredentials(email: email, password: password))
-            if shouldRestoreFloating {
-                floatingController.restoreAfterModalIfNeeded(true)
-            } else if context == .initialLaunch || existing == nil {
-                floatingController.show()
+        controller.onSubmit = { [weak self, weak controller] emailValue, passwordValue in
+            guard let self, let controller else {
+                return
             }
-            usageStore.credentialsDidChangeAndRefreshNow()
-        } catch {
-            floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
-            let errorAlert = NSAlert(error: error)
-            errorAlert.messageText = "登录凭据保存失败"
-            errorAlert.runModal()
+            let email = emailValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let password = passwordValue.isEmpty
+                ? (existing?.password ?? "")
+                : passwordValue
+            guard email.isEmpty == false else {
+                controller.showError("请输入 Krill AI 邮箱。")
+                return
+            }
+            guard password.isEmpty == false else {
+                controller.showError("请输入 Krill AI 密码。")
+                return
+            }
+
+            let credentials = KrillCredentials(email: email, password: password)
+            controller.setSubmitting(true)
+            credentialValidationTask?.cancel()
+            credentialValidationTask = Task { [weak self, weak controller] in
+                guard let self, let controller else {
+                    return
+                }
+
+                do {
+                    _ = try await credentialValidationClient.login(credentials: credentials)
+                    try Task.checkCancellation()
+                    try keychain.saveCredentials(credentials)
+                    didPromptForCredentialFailure = false
+                    controller.finishSuccessfully()
+                } catch {
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    controller.setSubmitting(false)
+                    controller.showError("登录失败：\(error.localizedDescription)")
+                }
+            }
+        }
+
+        controller.onClose = { [weak self] completed in
+            guard let self else {
+                return
+            }
+
+            credentialValidationTask?.cancel()
+            credentialValidationTask = nil
+            credentialsWindowController = nil
+            if completed {
+                if shouldRestoreFloating {
+                    floatingController.restoreAfterModalIfNeeded(true)
+                } else if context == .initialLaunch || existing == nil {
+                    floatingController.show()
+                }
+                usageStore.credentialsDidChangeAndRefreshNow()
+            } else {
+                floatingController.restoreAfterModalIfNeeded(shouldRestoreFloating)
+            }
+        }
+
+        controller.onClearCredentials = { [weak self] in
+            self?.clearCredentialsAndRefresh()
+        }
+
+        controller.reveal()
+        if let initialError {
+            controller.showError(initialError)
         }
     }
 
-    private func labeledField(title: String, field: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        label.frame = NSRect(x: 0, y: 0, width: 44, height: 24)
+    private func promptForCredentialsIfNeeded(_ snapshot: UsageSnapshot) {
+        guard snapshot.needsToken else {
+            if snapshot.isLoading == false,
+               snapshot.lastError == nil,
+               snapshot.lastRefresh != nil {
+                didPromptForCredentialFailure = false
+            }
+            return
+        }
+        guard didPromptForCredentialFailure == false,
+              credentialsWindowController == nil,
+              keychain.hasStoredCredentials(),
+              snapshot.lastError?.contains("登录失败") == true
+        else {
+            return
+        }
 
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
-        row.addArrangedSubview(label)
-        row.addArrangedSubview(field)
-        row.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
-        return row
+        didPromptForCredentialFailure = true
+        let loginErrorMessage = snapshot.lastError ?? "登录失败，请重新输入 Krill AI 账号和密码。"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self,
+                  self.keychain.hasStoredCredentials()
+            else {
+                return
+            }
+            self.promptForCredentials(context: .initialLaunch, initialError: loginErrorMessage)
+        }
     }
 
     private func thresholdRow(title: String, field: NSTextField) -> NSView {
@@ -392,27 +461,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showBalanceThresholdValidationAlert(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "余额阈值无效"
+        alert.messageText = "余额提醒区间无效"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "重新输入")
         alert.runModal()
-    }
-
-    private func configureCredentialInput(_ field: NSTextField) {
-        if #available(macOS 11.0, *) {
-            field.contentType = nil
-        }
-        field.isAutomaticTextCompletionEnabled = false
-        field.usesSingleLineMode = true
-        field.allowsEditingTextAttributes = false
-        field.importsGraphics = false
-        if #available(macOS 15.2, *) {
-            field.allowsWritingTools = false
-        }
-        if #available(macOS 15.4, *) {
-            field.allowsWritingToolsAffordance = false
-        }
     }
 
     private func refreshIntervalTitle() -> String {
@@ -421,6 +474,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateEdgeProgressMenuItem() {
         edgeProgressMenuItem?.state = EdgeProgressPreference.isEnabled ? .on : .off
+    }
+
+    private func updateFloatingBallMenuItem() {
+        floatingBallMenuItem?.state = floatingController.isVisible ? .on : .off
     }
 
     private func updateLaunchAtLoginMenuItem() {
@@ -473,13 +530,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             outer.lineWidth = 1.7
             outer.stroke()
 
+            let buttonRadius: CGFloat = 3.4
+            let dividerGap = buttonRadius + 1.0
             let divider = NSBezierPath()
             divider.move(to: NSPoint(x: bounds.minX + 1.4, y: center.y))
+            divider.line(to: NSPoint(x: center.x - dividerGap, y: center.y))
+            divider.move(to: NSPoint(x: center.x + dividerGap, y: center.y))
             divider.line(to: NSPoint(x: bounds.maxX - 1.4, y: center.y))
             divider.lineWidth = 1.7
             divider.stroke()
 
-            let buttonOuter = NSBezierPath(ovalIn: NSRect(x: center.x - 3.4, y: center.y - 3.4, width: 6.8, height: 6.8))
+            let buttonOuter = NSBezierPath(ovalIn: NSRect(
+                x: center.x - buttonRadius,
+                y: center.y - buttonRadius,
+                width: buttonRadius * 2,
+                height: buttonRadius * 2
+            ))
             buttonOuter.lineWidth = 1.7
             buttonOuter.stroke()
 
@@ -510,26 +576,285 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-private final class ShortcutTextField: NSTextField {
-    override func keyDown(with event: NSEvent) {
-        guard handleStandardEditingShortcut(event, field: self) == false else {
-            return
-        }
-        super.keyDown(with: event)
-    }
-}
+@MainActor
+private final class CredentialsWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
+    var onSubmit: ((_ email: String, _ password: String) -> Void)?
+    var onClearCredentials: (() -> Void)?
+    var onClose: ((_ completed: Bool) -> Void)?
 
-private final class ShortcutSecureTextField: NSSecureTextField {
-    override func keyDown(with event: NSEvent) {
-        guard handleStandardEditingShortcut(event, field: self) == false else {
+    private let existing: KrillCredentials?
+    private let canClearCredentials: Bool
+    private let emailInput = NSTextField(frame: .zero)
+    private let passwordInput = NSSecureTextField(frame: .zero)
+    private let errorLabel = NSTextField(labelWithString: "")
+    private let clearButton = NSButton(title: "清除登录信息", target: nil, action: nil)
+    private let submitButton = NSButton(title: "登录并刷新", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
+    private var completed = false
+    private var isSubmitting = false
+
+    init(existing: KrillCredentials?, canClearCredentials: Bool) {
+        self.existing = existing
+        self.canClearCredentials = canClearCredentials
+
+        let panel = CredentialsWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 226),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Krill 账号"
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.moveToActiveSpace]
+
+        super.init(window: panel)
+
+        panel.delegate = self
+        buildContent(in: panel, existing: existing)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func reveal() {
+        guard let window else {
             return
         }
-        super.keyDown(with: event)
+
+        NSApp.activate(ignoringOtherApps: true)
+        if window.isVisible == false {
+            window.center()
+        }
+        showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let window = self.window
+            else {
+                return
+            }
+            window.makeFirstResponder(self.existing?.email.isEmpty == false ? self.passwordInput : self.emailInput)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose?(completed)
+        onClose = nil
+        onSubmit = nil
+        onClearCredentials = nil
+    }
+
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            submit()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            cancel()
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func buildContent(in panel: NSWindow, existing: KrillCredentials?) {
+        let contentView = NSView()
+        panel.contentView = contentView
+
+        let titleLabel = NSTextField(labelWithString: "Krill 账号")
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.textColor = .labelColor
+
+        let descriptionLabel = NSTextField(
+            wrappingLabelWithString: "请输入 Krill AI 的邮箱和密码。凭据会保存到 macOS Keychain，源码和配置文件不会保存该信息。"
+        )
+        descriptionLabel.font = .systemFont(ofSize: 12)
+        descriptionLabel.textColor = .secondaryLabelColor
+
+        emailInput.placeholderString = "邮箱"
+        emailInput.stringValue = existing?.email ?? ""
+        emailInput.delegate = self
+        configureCredentialInput(emailInput, contentType: .username)
+
+        passwordInput.placeholderString = existing == nil ? "密码" : "留空则保留原密码"
+        passwordInput.delegate = self
+        configureCredentialInput(passwordInput, contentType: .password)
+
+        errorLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        errorLabel.textColor = .systemRed
+        errorLabel.isHidden = true
+        errorLabel.lineBreakMode = .byTruncatingTail
+
+        clearButton.target = self
+        clearButton.action = #selector(clearStoredCredentials)
+        clearButton.isHidden = canClearCredentials == false
+        cancelButton.target = self
+        cancelButton.action = #selector(cancel)
+        submitButton.target = self
+        submitButton.action = #selector(submit)
+        submitButton.keyEquivalent = "\r"
+        submitButton.bezelStyle = .rounded
+
+        let buttonRow = NSStackView(views: [cancelButton, submitButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.alignment = .centerY
+
+        let buttonContainer = NSView()
+        buttonContainer.addSubview(clearButton)
+        buttonContainer.addSubview(buttonRow)
+
+        let stack = NSStackView(views: [
+            titleLabel,
+            descriptionLabel,
+            inputRow(title: "邮箱", field: emailInput),
+            inputRow(title: "密码", field: passwordInput),
+            errorLabel,
+            buttonContainer
+        ])
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(stack)
+
+        buttonContainer.translatesAutoresizingMaskIntoConstraints = false
+        clearButton.translatesAutoresizingMaskIntoConstraints = false
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        clearButton.setContentHuggingPriority(.required, for: .horizontal)
+        buttonRow.setContentHuggingPriority(.required, for: .horizontal)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            descriptionLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            emailInput.widthAnchor.constraint(equalToConstant: 360),
+            passwordInput.widthAnchor.constraint(equalToConstant: 360),
+            errorLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            buttonContainer.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            buttonContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
+            clearButton.leadingAnchor.constraint(equalTo: buttonContainer.leadingAnchor),
+            clearButton.centerYAnchor.constraint(equalTo: buttonContainer.centerYAnchor),
+            buttonRow.trailingAnchor.constraint(equalTo: buttonContainer.trailingAnchor),
+            buttonRow.centerYAnchor.constraint(equalTo: buttonContainer.centerYAnchor),
+        ])
+
+        panel.initialFirstResponder = existing?.email.isEmpty == false ? passwordInput : emailInput
+        panel.defaultButtonCell = submitButton.cell as? NSButtonCell
+    }
+
+    private func inputRow(title: String, field: NSTextField) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .right
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSStackView(views: [label, field])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint.activate([
+            label.widthAnchor.constraint(equalToConstant: 44),
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+        ])
+        return row
+    }
+
+    @objc private func submit() {
+        guard isSubmitting == false else {
+            return
+        }
+        clearError()
+        onSubmit?(emailInput.stringValue, passwordInput.stringValue)
+    }
+
+    @objc private func cancel() {
+        close()
+    }
+
+    @objc private func clearStoredCredentials() {
+        guard isSubmitting == false else {
+            return
+        }
+        onClearCredentials?()
+        close()
+    }
+
+    func setSubmitting(_ submitting: Bool) {
+        isSubmitting = submitting
+        emailInput.isEnabled = submitting == false
+        passwordInput.isEnabled = submitting == false
+        clearButton.isEnabled = submitting == false
+        cancelButton.isEnabled = submitting == false
+        submitButton.isEnabled = submitting == false
+        submitButton.title = submitting ? "登录中..." : "登录并刷新"
+    }
+
+    func finishSuccessfully() {
+        completed = true
+        close()
+    }
+
+    func showError(_ message: String) {
+        errorLabel.stringValue = message
+        errorLabel.isHidden = false
+        window?.makeFirstResponder(message.contains("邮箱") ? emailInput : passwordInput)
+    }
+
+    private func clearError() {
+        errorLabel.stringValue = ""
+        errorLabel.isHidden = true
     }
 }
 
 @MainActor
-private func handleStandardEditingShortcut(_ event: NSEvent, field: NSTextField) -> Bool {
+private func configureCredentialInput(_ field: NSTextField, contentType: NSTextContentType) {
+    field.translatesAutoresizingMaskIntoConstraints = false
+    if #available(macOS 11.0, *) {
+        field.contentType = contentType
+    }
+    field.isAutomaticTextCompletionEnabled = false
+    field.usesSingleLineMode = true
+    field.allowsEditingTextAttributes = false
+    field.importsGraphics = false
+    if #available(macOS 15.2, *) {
+        field.allowsWritingTools = false
+    }
+    if #available(macOS 15.4, *) {
+        field.allowsWritingToolsAffordance = false
+    }
+}
+
+private final class CredentialsWindow: NSWindow {
+    override var canBecomeKey: Bool {
+        true
+    }
+
+    override var canBecomeMain: Bool {
+        true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if handleStandardEditingShortcut(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+@MainActor
+private func handleStandardEditingShortcut(_ event: NSEvent) -> Bool {
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
     guard flags.contains(.command) || flags.contains(.control),
           flags.contains(.option) == false
@@ -540,17 +865,17 @@ private func handleStandardEditingShortcut(_ event: NSEvent, field: NSTextField)
     let key = event.charactersIgnoringModifiers?.lowercased() ?? keyEquivalent(for: event.keyCode)
     switch key {
     case "v":
-        return performTextAction(#selector(NSText.paste(_:)), field: field)
+        return performTextAction(#selector(NSText.paste(_:)))
     case "c":
-        return performTextAction(#selector(NSText.copy(_:)), field: field)
+        return performTextAction(#selector(NSText.copy(_:)))
     case "x":
-        return performTextAction(#selector(NSText.cut(_:)), field: field)
+        return performTextAction(#selector(NSText.cut(_:)))
     case "a":
-        return performTextAction(#selector(NSText.selectAll(_:)), field: field)
+        return performTextAction(#selector(NSText.selectAll(_:)))
     case "z" where flags.contains(.shift):
-        return performTextAction(Selector(("redo:")), field: field)
+        return performTextAction(Selector(("redo:")))
     case "z":
-        return performTextAction(Selector(("undo:")), field: field)
+        return performTextAction(Selector(("undo:")))
     default:
         return false
     }
@@ -574,14 +899,14 @@ private func keyEquivalent(for keyCode: UInt16) -> String? {
 }
 
 @MainActor
-private func performTextAction(_ action: Selector, field: NSTextField) -> Bool {
-    if NSApp.sendAction(action, to: nil, from: field) {
+private func performTextAction(_ action: Selector) -> Bool {
+    if NSApp.sendAction(action, to: nil, from: NSApp.keyWindow) {
         return true
     }
 
-    guard let editor = field.currentEditor() else {
+    guard let editor = NSApp.keyWindow?.firstResponder as? NSText else {
         return false
     }
-    editor.perform(action, with: field)
+    editor.perform(action, with: nil)
     return true
 }

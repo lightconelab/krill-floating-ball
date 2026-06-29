@@ -68,16 +68,7 @@ enum UsageAggregator {
 
         let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
         let quotaSummaries = activeSubscriptions.map { subscriptionQuotaSummary(for: $0) }
-        let subscriptionDisplays = quotaSummaries.map(\.displayItem).sorted { left, right in
-            let leftRemaining = left.monthlyRemaining ?? -.infinity
-            let rightRemaining = right.monthlyRemaining ?? -.infinity
-
-            if leftRemaining != rightRemaining {
-                return leftRemaining > rightRemaining
-            }
-
-            return (left.expiry ?? .distantPast) > (right.expiry ?? .distantPast)
-        }
+        let subscriptionDisplays = quotaSummaries.map(\.displayItem)
         let poolQuotas = quotaSummaries.compactMap(\.poolQuota)
         let recurringStarts = quotaSummaries.compactMap(\.recurringWindowStart)
         let recurringEnds = quotaSummaries.compactMap(\.recurringWindowEnd)

@@ -197,6 +197,19 @@ struct UsageSnapshot: Equatable {
         return max(0, min(100, amount / total * 100))
     }
 
+    var emptyDisplayText: String {
+        if needsToken {
+            return "未登录"
+        }
+        if isLoading && lastRefresh == nil {
+            return "加载中"
+        }
+        if lastError != nil && lastRefresh == nil {
+            return "获取失败"
+        }
+        return "无额度"
+    }
+
     static let placeholder = UsageSnapshot(
         primaryMode: .empty,
         primaryAmount: nil,
@@ -229,20 +242,8 @@ struct UsageSnapshot: Equatable {
         lastError: nil
     )
 
-    static func missingCredentials(previous: UsageSnapshot) -> UsageSnapshot {
-        var next = previous
-        next.primaryMode = .empty
-        next.primaryAmount = nil
-        next.primaryTotal = nil
-        next.primaryEnd = nil
-        next.weeklyRemaining = nil
-        next.weeklyUsed = nil
-        next.weeklyTotal = nil
-        next.weekStart = nil
-        next.weekEnd = nil
-        next.needsToken = true
-        next.isLoading = false
-        next.isStale = previous.lastRefresh != nil
+    static func missingCredentials(previous _: UsageSnapshot) -> UsageSnapshot {
+        var next = UsageSnapshot.placeholder
         next.lastError = "请通过菜单栏设置 Krill 账号"
         return next
     }
