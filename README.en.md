@@ -18,14 +18,6 @@ Krill Floating Ball is a native macOS desktop widget for monitoring Krill AI sub
 | --- | --- |
 | <img src="docs/images/floating-ball.png" width="160" alt="Floating ball"> | <img src="docs/images/expanded-panel.png" width="760" alt="Expanded panel"> |
 
-### Usage Statistic Ranges
-
-`Monthly Window` covers the current quota window of the earliest active monthly plan. `Monthly Plan` covers the same monthly plan from its active start time to now.
-
-| Monthly Window | Monthly Plan |
-| --- | --- |
-| <img src="docs/images/stats-month-window.png" width="640" alt="Monthly window usage statistics"> | <img src="docs/images/stats-month-plan.png" width="640" alt="Monthly plan usage statistics"> |
-
 ### Edge Progress Bar
 
 When the widget is near a screen edge, it can snap into a progress bar. Left and right edges use a vertical bar, while top and bottom edges use a horizontal bar. Hovering still opens the full information panel.
@@ -36,19 +28,13 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 
 ### Menu Bar And Account
 
-| Menu Icon | Menu Actions | Balance Alert Ranges |
-| --- | --- | --- |
-| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> | <img src="docs/images/balance-thresholds.png" width="360" alt="Balance alert range settings"> |
+| Menu Icon | Menu Actions |
+| --- | --- |
+| <img src="docs/images/menubar-icon.png" width="96" alt="Menu bar icon"> | <img src="docs/images/menubar-menu.png" width="240" alt="Menu actions"> |
 
 | Krill Account | Missing Account |
 | --- | --- |
 | <img src="docs/images/login-prompt.png" width="520" alt="Krill account prompt"> | <img src="docs/images/missing-login-overview.png" width="720" alt="Missing account state"> |
-
-### Krill Account Comparison
-
-<p align="center">
-  <img src="docs/images/krill-profile.png" width="920" alt="Krill account comparison">
-</p>
 
 ## Features
 
@@ -61,53 +47,17 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Configurable automatic refresh interval, defaulting to 30 seconds. The next automatic refresh is scheduled after the previous refresh completes.
 - Manual refresh, launch at login, balance alert ranges, Krill account management, desktop widget visibility, edge progress bar mode, and quit actions from the menu bar.
 - Failed refreshes keep the last successful data and show a status badge beside the refresh time without overwriting the last successful refresh timestamp.
-- Krill login credentials are stored in macOS Keychain. API tokens are obtained at runtime through login and are not written to source files or local configuration.
+- Krill account information is stored in macOS Keychain and is not written to source files or local configuration.
 
-## Data Scope
+## What It Shows
 
-### Active Subscriptions
+- The expanded panel shows usage statistics, cache rate, wallet balance, refresh status, and active subscriptions.
+- Active subscription cards show plan name, time range, quota progress, and remaining time.
+- The floating ball and edge progress bar provide a quick visual status indicator; the expanded panel remains the detailed view.
+- Wallet balance is shown separately from subscription cards.
+- Values in screenshots are UI examples only and do not document fixed quota rules or real account data.
 
-Active subscriptions are filtered with:
-
-```text
-active = true && now >= subscription_start_at && now < subscription_end_at
-```
-
-Subscription cards keep the original `subscriptions` order returned by the `subscription` API after inactive and expired items are filtered out.
-
-### Subscription Quota
-
-- The app aggregates currently available quota from active time ranges, quota windows, and returned quota fields.
-- The expanded panel displays each active item as weekly quota, monthly quota, or total quota according to the resolved quota type.
-- Wallet balance is displayed as a separate balance and is not merged into subscription cards.
-
-### Floating Ball Level
-
-The floating ball represents the current available quota pool, not a single subscription. If the quota pool is exhausted while wallet balance is still available, the ball switches to balance mode.
-
-The liquid level and edge progress bar are based on remaining percentage:
-
-| Remaining Quota | Alert Color |
-| --- | --- |
-| `> 60%` | Blue, sufficient quota |
-| `> 30%` | Cyan-blue, healthy but worth watching |
-| `> 10%` | Amber, low quota |
-| `<= 10%` | Red, critical quota |
-
-Balance mode has no fixed total-quota denominator, so it does not show a liquid percentage. It uses balance-level colors instead, and the balance alert ranges can be adjusted from the menu bar.
-
-### Usage Statistics
-
-Usage statistics are read from Krill request-log stats. The main fields are:
-
-- Spend: `total_cost_usd`
-- Requests: `total_requests`
-- Tokens: `total_tokens`
-- Cache rate: `channel_cache_rates`
-
-`Today` uses the user's local calendar day. Large ranges are requested in smaller chunks and parsed for only the required fields to reduce peak memory usage when switching ranges.
-
-`Monthly Window` and `Monthly Plan` are available only when an active monthly plan exists, and both use the active monthly plan with the earliest `subscription_start_at`. `Monthly Window` covers that plan's current quota window up to now, while `Monthly Plan` covers that plan's active period start up to now.
+The exact display changes with the current account's subscriptions, balance, and usage. This README intentionally does not document internal calculation details.
 
 ## Requirements
 
@@ -153,7 +103,7 @@ Build outputs are written to `dist/`. `dist/`, `.build/`, and zip files are igno
 
 Krill Floating Ball is drawn with native AppKit and does not use Electron or WebView. The app releases the hover panel window after collapse and reduces drawing and window overhead while hidden. Release builds use `-Osize` and strip the executable with `strip -x`.
 
-Actual CPU, memory, and energy impact depend on the device, macOS version, display scaling, selected statistic range, and API response size. The screenshots below are from one local run and should be treated as rough reference points.
+Actual CPU, memory, and energy impact depend on the device, macOS version, display scaling, selected statistic range, and account data size. The screenshots below are from one local run and should be treated as rough reference points.
 
 | CPU Usage | Memory Usage |
 | --- | --- |
@@ -165,9 +115,8 @@ Actual CPU, memory, and energy impact depend on the device, macOS version, displ
 
 ## Privacy
 
-- The app calls Krill APIs directly from your Mac.
 - Krill email and password are stored in macOS Keychain.
-- API tokens are obtained at runtime and are not written to the repository, source files, or local config files.
+- Login information is only used to connect to the Krill AI service and is not written to the repository, source files, or local config files.
 - The project does not include analytics, telemetry, crash reporting, or third-party tracking SDKs.
 
 ## Project Layout
@@ -182,7 +131,7 @@ dist/                          Local build output, ignored by Git
 
 ## Notes
 
-Krill AI APIs and response fields may change over time. If the API response shape changes, the app may need an update. Please include reproduction steps, screenshots, macOS version, and app version when opening an issue.
+Krill Floating Ball is a third-party companion tool. The actual display depends on the current account state. Please include reproduction steps, screenshots, macOS version, and app version when opening an issue.
 
 ## License
 

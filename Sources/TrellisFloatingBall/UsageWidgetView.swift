@@ -69,8 +69,8 @@ final class UsageWidgetView: NSView {
 
     private let ballSize: CGFloat = 80
     private let ballInset: CGFloat = 12
-    private let panelMinWidth: CGFloat = 620
-    private let panelCompactMinWidth: CGFloat = 420
+    private let panelMinWidth: CGFloat = 580
+    private let panelCompactMinWidth: CGFloat = 400
     private let panelMaxWidth: CGFloat = 860
     private let panelWeeklyCardHeight: CGFloat = 166
     private let panelTotalCardHeight: CGFloat = 122
@@ -703,7 +703,6 @@ final class UsageWidgetView: NSView {
     }
 
     private enum StatCardStyle {
-        case inlineTrend
         case cacheBars
         case centeredValue
     }
@@ -719,8 +718,15 @@ final class UsageWidgetView: NSView {
         let value: String
         let icon: StatIcon
         let tint: NSColor
-        let trend: StatTrendKind?
         let style: StatCardStyle
+    }
+
+    private struct UsageMetricContent {
+        let title: String
+        let value: String
+        let icon: StatIcon
+        let tint: NSColor
+        let trend: StatTrendKind
     }
 
     private func drawStatsSummary(in rect: NSRect, state: QuotaState, alpha: CGFloat) {
@@ -767,45 +773,42 @@ final class UsageWidgetView: NSView {
         )
         drawStatsStatus(in: content, refreshRect: refreshRect, rangeStartX: rangeStartX, alpha: alpha)
 
-        let cards = [
-            StatCardContent(
+        let metrics = [
+            UsageMetricContent(
                 title: "花费",
                 value: Formatters.usd(snapshot.todayCost),
                 icon: .spending,
                 tint: NSColor(hex: 0x1A56DB),
-                trend: .cost,
-                style: .inlineTrend
+                trend: .cost
             ),
-            StatCardContent(
+            UsageMetricContent(
                 title: "请求数",
                 value: Formatters.integer(snapshot.requestCount),
                 icon: .requests,
                 tint: NSColor(hex: 0x7C3AED),
-                trend: .requests,
-                style: .inlineTrend
+                trend: .requests
             ),
-            StatCardContent(
+            UsageMetricContent(
                 title: "Tokens",
                 value: Formatters.compactInteger(snapshot.totalTokens),
                 icon: .tokens,
                 tint: NSColor(hex: 0xEA580C),
-                trend: .tokens,
-                style: .inlineTrend
-            ),
+                trend: .tokens
+            )
+        ]
+        let sideCards = [
             StatCardContent(
                 title: "缓存率",
                 value: "",
                 icon: .cache,
                 tint: NSColor(hex: 0x0D9F6E),
-                trend: nil,
                 style: .cacheBars
             ),
             StatCardContent(
                 title: "钱包余额",
                 value: Formatters.usd(snapshot.walletBalance),
                 icon: .wallet,
-                tint: NSColor(hex: 0x64748B),
-                trend: nil,
+                tint: NSColor(hex: 0xC99700),
                 style: .centeredValue
             )
         ]
@@ -813,15 +816,16 @@ final class UsageWidgetView: NSView {
         let itemGap: CGFloat = 8
         let cardHeight = statsCardHeight()
         let cardY = content.minY + statsHeaderHeight
-        let itemWidth: CGFloat = (content.width - itemGap * CGFloat(cards.count - 1)) / CGFloat(cards.count)
-        for (index, item) in cards.enumerated() {
-            let x = content.minX + CGFloat(index) * (itemWidth + itemGap)
-            drawStatCard(
-                item,
-                rect: NSRect(x: x, y: cardY, width: itemWidth, height: cardHeight),
-                alpha: alpha
-            )
-        }
+        let usableCardWidth = max(0, content.width - itemGap * 2)
+        let metricCardWidth = floor(usableCardWidth * 0.5)
+        let sideCardWidth = (usableCardWidth - metricCardWidth) / 2
+        let metricRect = NSRect(x: content.minX, y: cardY, width: metricCardWidth, height: cardHeight)
+        let cacheRect = NSRect(x: metricRect.maxX + itemGap, y: cardY, width: sideCardWidth, height: cardHeight)
+        let walletRect = NSRect(x: cacheRect.maxX + itemGap, y: cardY, width: sideCardWidth, height: cardHeight)
+
+        drawUsageMetricCard(metrics, rect: metricRect, alpha: alpha)
+        drawStatCard(sideCards[0], rect: cacheRect, alpha: alpha)
+        drawStatCard(sideCards[1], rect: walletRect, alpha: alpha)
 
         let line = NSBezierPath()
         line.move(to: NSPoint(x: content.minX, y: content.maxY - 1))
@@ -836,12 +840,7 @@ final class UsageWidgetView: NSView {
         rect: NSRect,
         alpha: CGFloat
     ) {
-        let card = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
-        statCardBackgroundColor(alpha: alpha).setFill()
-        card.fill()
-        statCardBorderColor(alpha: alpha).setStroke()
-        card.lineWidth = 0.8
-        card.stroke()
+        drawStatCardShell(in: rect, alpha: alpha)
 
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
         let measuredTitleWidth = measuredWidth(content.title, font: titleFont)
@@ -852,13 +851,6 @@ final class UsageWidgetView: NSView {
 
         let valueRect: NSRect
         switch content.style {
-        case .inlineTrend:
-            valueRect = NSRect(
-                x: rect.minX + 8,
-                y: rect.maxY - 24,
-                width: rect.width - 16,
-                height: 17
-            )
         case .cacheBars:
             valueRect = NSRect(x: rect.minX + 6, y: rect.minY + 43, width: rect.width - 12, height: 22)
         case .centeredValue:
@@ -887,22 +879,6 @@ final class UsageWidgetView: NSView {
         )
 
         switch content.style {
-        case .inlineTrend:
-            if let trend = content.trend {
-                drawSparkline(
-                    trend: trend,
-                    rect: sparklineRect(in: rect),
-                    tint: content.tint,
-                    alpha: alpha
-                )
-            }
-            drawText(
-                content.value,
-                rect: valueRect,
-                font: fittedMonospacedFont(text: content.value, maxSize: 12.8, minSize: 9.8, width: valueRect.width, weight: .bold),
-                color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
-                alignment: .center
-            )
         case .cacheBars:
             drawCacheRateBars(in: rect.insetBy(dx: 8, dy: 8), tint: content.tint, alpha: alpha)
         case .centeredValue:
@@ -914,6 +890,120 @@ final class UsageWidgetView: NSView {
                 alignment: .center
             )
         }
+    }
+
+    private func drawUsageMetricCard(
+        _ metrics: [UsageMetricContent],
+        rect: NSRect,
+        alpha: CGFloat
+    ) {
+        drawStatCardShell(in: rect, alpha: alpha)
+        guard metrics.isEmpty == false else {
+            return
+        }
+
+        let body = rect.insetBy(dx: 10, dy: 8)
+        let rowHeight = body.height / CGFloat(metrics.count)
+        let titleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let valueMeasureFont = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .semibold)
+        let maxTitleWidth = min(48, max(
+            34,
+            metrics.map { measuredWidth($0.title, font: titleFont) }.max() ?? 34
+        ) + 2)
+        let measuredValueWidth = metrics.map { measuredWidth($0.value, font: valueMeasureFont) }.max() ?? 48
+        let valueWidth = min(
+            max(56, measuredValueWidth + 4),
+            max(56, body.width * 0.34)
+        )
+
+        for (index, metric) in metrics.enumerated() {
+            let rowRect = NSRect(
+                x: body.minX,
+                y: body.minY + CGFloat(index) * rowHeight,
+                width: body.width,
+                height: rowHeight
+            )
+            drawUsageMetricRow(
+                metric,
+                rect: rowRect,
+                titleWidth: maxTitleWidth,
+                valueWidth: valueWidth,
+                alpha: alpha
+            )
+        }
+    }
+
+    private func drawUsageMetricRow(
+        _ metric: UsageMetricContent,
+        rect: NSRect,
+        titleWidth: CGFloat,
+        valueWidth: CGFloat,
+        alpha: CGFloat
+    ) {
+        let iconSize = min(18, max(15, rect.height - 5))
+        let iconRect = NSRect(
+            x: rect.minX,
+            y: rect.midY - iconSize / 2,
+            width: iconSize,
+            height: iconSize
+        )
+        let titleRect = NSRect(
+            x: iconRect.maxX + 6,
+            y: rect.midY - 6.5,
+            width: titleWidth,
+            height: 13
+        )
+        let valueRect = NSRect(
+            x: rect.maxX - valueWidth,
+            y: rect.midY - 7.0,
+            width: valueWidth,
+            height: 14
+        )
+        let sparklineX = titleRect.maxX + 8
+        let sparklineWidth = max(22, valueRect.minX - sparklineX - 8)
+        let sparkHeight = min(16, max(10, rect.height - 9))
+        let metricSparklineRect = NSRect(
+            x: sparklineX,
+            y: rect.midY - sparkHeight / 2,
+            width: sparklineWidth,
+            height: sparkHeight
+        )
+
+        let iconBackground = metric.tint.blended(withFraction: 0.90, of: .white) ?? NSColor.white
+        iconBackground.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: iconRect, xRadius: 5, yRadius: 5).fill()
+        let iconInset = min(4.2, iconRect.width * 0.24)
+        drawStatIcon(metric.icon, in: iconRect.insetBy(dx: iconInset, dy: iconInset), tint: metric.tint, alpha: alpha)
+
+        drawText(
+            metric.title,
+            rect: titleRect,
+            font: fittedSystemFont(text: metric.title, maxSize: 11, minSize: 9.6, width: titleRect.width, weight: .medium),
+            color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
+            alignment: .left
+        )
+        drawSparkline(
+            trend: metric.trend,
+            rect: metricSparklineRect,
+            tint: metric.tint,
+            alpha: alpha
+        )
+        drawText(
+            metric.value,
+            rect: valueRect,
+            font: fittedMonospacedFont(text: metric.value, maxSize: 12.2, minSize: 9.6, width: valueRect.width, weight: .bold),
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+            alignment: .right
+        )
+    }
+
+    private func drawStatCardShell(in rect: NSRect, alpha: CGFloat) {
+        let card = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
+        statCardBackgroundColor(alpha: alpha).setFill()
+        card.fill()
+        statCardBorderColor(alpha: alpha).setStroke()
+        card.lineWidth = 0.8
+        card.stroke()
     }
 
     private func drawStatsStatus(in content: NSRect, refreshRect: NSRect, rangeStartX: CGFloat, alpha: CGFloat) {
@@ -1071,21 +1161,6 @@ final class UsageWidgetView: NSView {
         path.lineJoinStyle = .round
         path.lineCapStyle = .round
         path.stroke()
-    }
-
-    private func sparklineRect(in rect: NSRect) -> NSRect {
-        let top = rect.minY + 36
-        let bottomPadding: CGFloat = 30
-        let availableHeight = max(18, rect.maxY - top - bottomPadding)
-        let height = snapshot.cacheRates.count <= 1
-            ? min(34, availableHeight)
-            : availableHeight
-        return NSRect(
-            x: rect.minX + 9,
-            y: top,
-            width: rect.width - 18,
-            height: height
-        )
     }
 
     private func drawCacheRateBars(in rect: NSRect, tint: NSColor, alpha: CGFloat) {
@@ -1690,28 +1765,38 @@ final class UsageWidgetView: NSView {
     private func preferredStatsContentWidth() -> CGFloat {
         let titleFont = sectionTitleFont()
         let rangeFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.2, weight: .bold)
+        let metricTitleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let metricValueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .semibold)
         let rangeWidth = statsRangeButtonsWidth(font: rangeFont)
         let refreshFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         let refreshWidth = measuredWidth("刷新时间：00:00:00", font: refreshFont) + 6
         let headerWidth = measuredWidth("使用统计", font: titleFont) + 14 + refreshWidth + 12 + rangeWidth
 
-        let inlineValues = [
+        let metricValues = [
             ("花费", Formatters.usd(snapshot.todayCost)),
             ("请求数", Formatters.integer(snapshot.requestCount)),
             ("Tokens", Formatters.compactInteger(snapshot.totalTokens))
         ]
-        let inlineCardWidth = inlineValues.reduce(CGFloat(122)) { width, item in
-            let titleWidth = measuredWidth(item.0, font: .systemFont(ofSize: 11, weight: .medium))
-            let valueWidth = measuredWidth(item.1, font: valueFont)
-            return max(width, titleWidth + 50, valueWidth + 24)
+        let metricCardWidth = metricValues.reduce(CGFloat(238)) { width, item in
+            let titleWidth = min(48, max(34, measuredWidth(item.0, font: metricTitleFont)) + 2)
+            let valueWidth = measuredWidth(item.1, font: metricValueFont) + 4
+            return max(width, 10 + 18 + 6 + titleWidth + 8 + 44 + 8 + max(56, valueWidth) + 10)
         }
-        let centeredCardWidth = max(
-            CGFloat(112),
+        let cacheCardWidth = max(
+            CGFloat(120),
+            measuredWidth("缓存率", font: metricTitleFont) + 46,
+            measuredWidth("100%", font: .monospacedDigitSystemFont(ofSize: 9, weight: .semibold)) + 72
+        )
+        let walletCardWidth = max(
+            CGFloat(120),
             measuredWidth("钱包余额", font: .systemFont(ofSize: 11, weight: .medium)) + 46,
             measuredWidth(Formatters.usd(snapshot.walletBalance), font: .monospacedDigitSystemFont(ofSize: 16.2, weight: .semibold)) + 20
         )
-        let cardsWidth = inlineCardWidth * 3 + centeredCardWidth * 2 + 8 * 4
+        let cardsWidth = max(
+            metricCardWidth * 2,
+            cacheCardWidth * 4,
+            walletCardWidth * 4
+        ) + 8 * 2
         return max(headerWidth, cardsWidth) + panelContentInset * 2
     }
 

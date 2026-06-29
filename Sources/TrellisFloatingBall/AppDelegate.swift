@@ -522,11 +522,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let strokeColor = NSColor.black
             let bounds = rect.insetBy(dx: 2, dy: 2)
             let center = NSPoint(x: bounds.midX, y: bounds.midY)
+            let buttonRadius: CGFloat = 3.55
+            let buttonRect = NSRect(
+                x: center.x - buttonRadius,
+                y: center.y - buttonRadius,
+                width: buttonRadius * 2,
+                height: buttonRadius * 2
+            )
 
             NSGraphicsContext.saveGraphicsState()
             NSBezierPath(ovalIn: bounds).addClip()
-            strokeColor.withAlphaComponent(0.22).setFill()
+            strokeColor.setFill()
             NSBezierPath(rect: NSRect(x: bounds.minX, y: center.y, width: bounds.width, height: bounds.height / 2)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: buttonRect.insetBy(dx: -0.45, dy: -0.45)).fill()
+            NSGraphicsContext.restoreGraphicsState()
+
+            let dividerGap = buttonRadius + 1.0
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.compositingOperation = .clear
+            let dividerCut = NSBezierPath()
+            dividerCut.move(to: NSPoint(x: bounds.minX + 1.4, y: center.y))
+            dividerCut.line(to: NSPoint(x: center.x - dividerGap, y: center.y))
+            dividerCut.move(to: NSPoint(x: center.x + dividerGap, y: center.y))
+            dividerCut.line(to: NSPoint(x: bounds.maxX - 1.4, y: center.y))
+            dividerCut.lineWidth = 1.55
+            dividerCut.lineCapStyle = .round
+            dividerCut.stroke()
             NSGraphicsContext.restoreGraphicsState()
 
             strokeColor.setStroke()
@@ -535,43 +560,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             outer.lineWidth = 1.7
             outer.stroke()
 
-            let buttonRadius: CGFloat = 3.4
-            let dividerGap = buttonRadius + 1.0
-            let divider = NSBezierPath()
-            divider.move(to: NSPoint(x: bounds.minX + 1.4, y: center.y))
-            divider.line(to: NSPoint(x: center.x - dividerGap, y: center.y))
-            divider.move(to: NSPoint(x: center.x + dividerGap, y: center.y))
-            divider.line(to: NSPoint(x: bounds.maxX - 1.4, y: center.y))
-            divider.lineWidth = 1.7
-            divider.stroke()
-
-            let buttonOuter = NSBezierPath(ovalIn: NSRect(
-                x: center.x - buttonRadius,
-                y: center.y - buttonRadius,
-                width: buttonRadius * 2,
-                height: buttonRadius * 2
-            ))
+            let buttonOuter = NSBezierPath(ovalIn: buttonRect)
             buttonOuter.lineWidth = 1.7
             buttonOuter.stroke()
 
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 5.9, weight: .black),
-                .foregroundColor: strokeColor,
-                .paragraphStyle: paragraph,
-            ]
-            let text = NSString(string: "K")
-            let textSize = text.size(withAttributes: attributes)
-            text.draw(
-                in: NSRect(
-                    x: center.x - textSize.width / 2,
-                    y: center.y - textSize.height / 2 - 0.2,
-                    width: textSize.width,
-                    height: textSize.height
-                ),
-                withAttributes: attributes
-            )
+            let kRect = buttonRect.insetBy(dx: 1.75, dy: 1.45)
+            let kPath = NSBezierPath()
+            kPath.move(to: NSPoint(x: kRect.minX, y: kRect.minY))
+            kPath.line(to: NSPoint(x: kRect.minX, y: kRect.maxY))
+            kPath.move(to: NSPoint(x: kRect.maxX, y: kRect.maxY))
+            kPath.line(to: NSPoint(x: kRect.minX + kRect.width * 0.28, y: center.y))
+            kPath.line(to: NSPoint(x: kRect.maxX, y: kRect.minY))
+            kPath.lineWidth = 1.05
+            kPath.lineCapStyle = .round
+            kPath.lineJoinStyle = .round
+            kPath.stroke()
 
             return true
         }
