@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+## v0.2.8 - 2026-06-29
+
+- Renamed the usage statistic range buttons to `月卡单窗口` and `月卡`, and scoped both ranges to the earliest-started active monthly plan.
+- Reduced refresh and statistic-switch memory overhead by reusing request coders, reusing the API date formatter, avoiding an extra full-file mmap for stats JSON validation, optimizing stats string scanning, and releasing the account-validation API client after the account dialog closes.
+- Removed system username/password content-type hints from the Krill account dialog to avoid unnecessary macOS AutoFill and LocalAuthentication helper activation.
+- Refreshed Chinese and English README screenshots for the expanded panel, monthly statistic ranges, edge progress bar, menu, account dialog, CPU, memory, and energy references.
+
 ## v0.2.7 - 2026-06-29
 
 - Added a lightweight `_kfp` fingerprint cookie generated locally for Krill login requests, keeping data fetching on direct HTTP requests without WebKit, Safari, or JavaScriptCore.

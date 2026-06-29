@@ -97,9 +97,9 @@ enum StatsRange: String, CaseIterable, Equatable {
     var title: String {
         switch self {
         case .quotaWeek:
-            return "额度周"
+            return "月卡单窗口"
         case .subscriptionPeriod:
-            return "套餐期"
+            return "月卡"
         case .today:
             return "今日"
         case .last7Days:

@@ -87,6 +87,54 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(promoCard.monthlyRemaining ?? 0, 4.258831, accuracy: 0.000_001)
     }
 
+    func testStatsRangesUseEarliestStartedMonthlyWindowSubscription() throws {
+        let subscription = try decodeSubscription(multipleMonthlySubscriptionsJSON)
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-23T12:00:00Z"))
+        let formatter = ISO8601DateFormatter()
+
+        let windowContext = try UsageAggregator.statsRangeContext(
+            subscription: subscription,
+            requested: .quotaWeek,
+            now: now
+        )
+        XCTAssertEqual(windowContext.effective, .quotaWeek)
+        XCTAssertEqual(windowContext.availableRanges, [.quotaWeek, .subscriptionPeriod, .today, .last7Days, .last30Days])
+        XCTAssertEqual(windowContext.start, formatter.date(from: "2026-06-17T00:00:00Z"))
+        XCTAssertEqual(windowContext.end, now)
+
+        let monthlyContext = try UsageAggregator.statsRangeContext(
+            subscription: subscription,
+            requested: .subscriptionPeriod,
+            now: now
+        )
+        XCTAssertEqual(monthlyContext.effective, .subscriptionPeriod)
+        XCTAssertEqual(monthlyContext.start, formatter.date(from: "2026-06-10T00:00:00Z"))
+        XCTAssertEqual(monthlyContext.end, now)
+    }
+
+    func testStatsJSONParserReadsRequiredFieldsFromFile() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krill-stats-parser-\(UUID().uuidString).json")
+        try statsJSON.write(to: fileURL, atomically: true, encoding: .utf8)
+        defer {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+
+        let envelope = try StatsJSONParser.decodeEnvelope(from: fileURL, trendLimit: 2)
+        let payload = try XCTUnwrap(envelope.data)
+
+        XCTAssertEqual(envelope.code, 0)
+        XCTAssertEqual(envelope.success, true)
+        XCTAssertEqual(payload.totalCostUsd, "12.3456")
+        XCTAssertEqual(payload.totalRequests, 123)
+        XCTAssertEqual(payload.totalTokens, 456_789)
+        XCTAssertEqual(payload.trend?.count, 2)
+        XCTAssertEqual(payload.trend?.first?.requestCount, 1)
+        XCTAssertEqual(payload.trend?.last?.totalTokens, 30)
+        XCTAssertEqual(payload.channelCacheRates?.first?.channelName, "OpenAI \"主\" 渠道")
+        XCTAssertEqual(payload.channelCacheRates?.first?.cacheRate ?? 0, 0.8123, accuracy: 0.000_001)
+    }
+
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
         let subscription = try decodeSubscription(exhaustedQuotaWithWalletJSON)
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-27T12:00:00Z"))
@@ -215,6 +263,110 @@ private let sampleSubscriptionJSON = """
         "subscription_end_at": "2026-07-16T07:01:10.923753Z",
         "subscription_start_at": "2026-06-15T07:01:10.923753Z",
         "total_used_usd": "552.548677"
+      }
+    ]
+  }
+}
+"""
+
+private let multipleMonthlySubscriptionsJSON = """
+{
+  "code": 0,
+  "success": true,
+  "data": {
+    "credit_balance_usd": "0",
+    "welfare_balance_usd": "0",
+    "subscriptions": [
+      {
+        "plan": {
+          "active": true,
+          "billing_type": "usd_monthly",
+          "daily_quota_usd": "0.000000",
+          "duration_days": 30,
+          "name": "世界杯奖励"
+        },
+        "quota": {
+          "daily_limit_usd": "20.000000",
+          "remaining_usd": "15.000000",
+          "used_usd": "5.000000"
+        },
+        "subscription_end_at": "2026-07-01T00:00:00Z",
+        "subscription_start_at": "2026-06-01T00:00:00Z",
+        "total_used_usd": "5.000000"
+      },
+      {
+        "plan": {
+          "active": true,
+          "billing_type": "usd_weekly",
+          "daily_quota_usd": "100.000000",
+          "duration_days": 30,
+          "name": "后开始月卡"
+        },
+        "quota": {
+          "daily_limit_usd": "100.000000",
+          "remaining_usd": "90.000000",
+          "used_usd": "10.000000",
+          "window_reset_at": "2026-06-29T00:00:00Z",
+          "window_start_at": "2026-06-22T00:00:00Z"
+        },
+        "subscription_end_at": "2026-07-15T00:00:00Z",
+        "subscription_start_at": "2026-06-15T00:00:00Z",
+        "total_used_usd": "10.000000"
+      },
+      {
+        "plan": {
+          "active": true,
+          "billing_type": "usd_weekly",
+          "daily_quota_usd": "100.000000",
+          "duration_days": 30,
+          "name": "最早月卡"
+        },
+        "quota": {
+          "daily_limit_usd": "100.000000",
+          "remaining_usd": "60.000000",
+          "used_usd": "40.000000",
+          "window_reset_at": "2026-06-24T00:00:00Z",
+          "window_start_at": "2026-06-17T00:00:00Z"
+        },
+        "subscription_end_at": "2026-07-10T00:00:00Z",
+        "subscription_start_at": "2026-06-10T00:00:00Z",
+        "total_used_usd": "40.000000"
+      }
+    ]
+  }
+}
+"""
+
+private let statsJSON = """
+{
+  "code": 0,
+  "success": true,
+  "message": null,
+  "data": {
+    "total_cost_usd": "12.3456",
+    "total_requests": 123,
+    "total_tokens": 456789,
+    "channel_cache_rates": [
+      {
+        "channel_name": "OpenAI \\"主\\" 渠道",
+        "cache_rate": 0.8123
+      }
+    ],
+    "trend": [
+      {
+        "request_count": 1,
+        "total_cost_usd": "0.1",
+        "total_tokens": 10
+      },
+      {
+        "request_count": 2,
+        "total_cost_usd": "0.2",
+        "total_tokens": 20
+      },
+      {
+        "request_count": 3,
+        "total_cost_usd": "0.3",
+        "total_tokens": 30
       }
     ]
   }

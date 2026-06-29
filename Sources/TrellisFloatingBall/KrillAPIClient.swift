@@ -61,6 +61,9 @@ final class KrillAPIClient: @unchecked Sendable {
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
     private let session: URLSession
     private let fingerprintStore: KrillFingerprintStore
+    private let codingLock = NSLock()
+    private let requestEncoder = JSONEncoder()
+    private let responseDecoder = JSONDecoder()
 
     init(session: URLSession? = nil, fingerprintStore: KrillFingerprintStore = .shared) {
         self.session = session ?? URLSession(configuration: Self.makeSessionConfiguration())
@@ -93,7 +96,7 @@ final class KrillAPIClient: @unchecked Sendable {
         applyBrowserFetchHeaders(to: &request, referer: "https://www.krill-ai.com/login")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
-        request.httpBody = try JSONEncoder().encode(LoginRequestPayload(
+        request.httpBody = try encode(LoginRequestPayload(
             email: credentials.email,
             password: credentials.password
         ))
@@ -142,7 +145,7 @@ final class KrillAPIClient: @unchecked Sendable {
             startTime: LocalProtocolDateFormatter.string(from: range.start),
             endTime: LocalProtocolDateFormatter.string(from: range.end)
         )
-        request.httpBody = try JSONEncoder().encode(payload)
+        request.httpBody = try encode(payload)
 
         let (fileURL, response) = try await downloadFile(for: request)
         defer {
@@ -291,10 +294,21 @@ final class KrillAPIClient: @unchecked Sendable {
     }
 
     private func responseLooksLikeJSON(_ response: URLResponse, dataURL: URL) -> Bool {
-        guard let data = try? Data(contentsOf: dataURL, options: [.mappedIfSafe]) else {
+        if (response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "content-type")?
+            .localizedCaseInsensitiveContains("json") == true {
+            return true
+        }
+
+        guard let handle = try? FileHandle(forReadingFrom: dataURL) else {
             return false
         }
-        return responseLooksLikeJSON(response, data: data)
+        defer {
+            try? handle.close()
+        }
+
+        let data = handle.readData(ofLength: 512)
+        return responseLooksLikeJSON(contentType: nil, data: data)
     }
 
     private func responseLooksLikeJSON(contentType: String?, data: Data) -> Bool {
@@ -438,7 +452,21 @@ final class KrillAPIClient: @unchecked Sendable {
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         try autoreleasepool {
-            try JSONDecoder().decode(type, from: data)
+            codingLock.lock()
+            defer {
+                codingLock.unlock()
+            }
+            return try responseDecoder.decode(type, from: data)
+        }
+    }
+
+    private func encode<T: Encodable>(_ value: T) throws -> Data {
+        try autoreleasepool {
+            codingLock.lock()
+            defer {
+                codingLock.unlock()
+            }
+            return try requestEncoder.encode(value)
         }
     }
 
@@ -510,12 +538,21 @@ private struct StatsRequestPayload: Encodable {
 }
 
 enum LocalProtocolDateFormatter {
-    static func string(from date: Date) -> String {
+    private static let lock = NSLock()
+    private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        return formatter
+    }()
+
+    static func string(from date: Date) -> String {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
         return formatter.string(from: date)
     }
 }
@@ -721,6 +758,8 @@ struct ChannelCacheRate: Decodable {
 }
 
 private struct StatsAccumulator {
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
     private var totalCost = 0.0
     private var hasTotalCost = false
     private var totalRequests = 0
@@ -796,7 +835,7 @@ private struct StatsAccumulator {
     }
 
     private func formatDecimal(_ value: Double) -> String {
-        let formatted = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), value)
+        let formatted = String(format: "%.6f", locale: Self.posixLocale, value)
         return formatted
             .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
@@ -821,7 +860,7 @@ private struct CacheRateAccumulator {
     }
 }
 
-private enum StatsJSONParser {
+enum StatsJSONParser {
     static func decodeEnvelope(from fileURL: URL, trendLimit: Int) throws -> StatsEnvelope {
         try autoreleasepool {
             let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
@@ -1096,35 +1135,43 @@ private struct JSONScanner {
         }
         advance()
 
-        var bytes: [UInt8] = []
-        var result = ""
-
-        func flushBytes() throws {
-            guard bytes.isEmpty == false else {
-                return
-            }
-            guard let text = String(bytes: bytes, encoding: .utf8) else {
-                throw JSONScanError.invalidString
-            }
-            result += text
-            bytes.removeAll(keepingCapacity: true)
-        }
+        var segmentStart = index
+        var escapedResult: String?
 
         while let byte = currentByte {
-            advance()
             if byte == 34 {
-                try flushBytes()
-                return result
+                let segmentEnd = index
+                advance()
+                if var result = escapedResult {
+                    result += try string(from: segmentStart..<segmentEnd)
+                    return result
+                }
+                return try string(from: segmentStart..<segmentEnd)
             }
             if byte == 92 {
-                try flushBytes()
-                result += try parseEscapedCharacter()
+                if escapedResult == nil {
+                    escapedResult = ""
+                }
+                escapedResult? += try string(from: segmentStart..<index)
+                advance()
+                escapedResult? += try parseEscapedCharacter()
+                segmentStart = index
             } else {
-                bytes.append(byte)
+                advance()
             }
         }
 
         throw JSONScanError.unexpectedEnd
+    }
+
+    private func string(from range: Range<Data.Index>) throws -> String {
+        guard range.isEmpty == false else {
+            return ""
+        }
+        guard let text = String(bytes: data[range], encoding: .utf8) else {
+            throw JSONScanError.invalidString
+        }
+        return text
     }
 
     private mutating func parseEscapedCharacter() throws -> String {

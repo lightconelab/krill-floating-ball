@@ -202,22 +202,18 @@ enum UsageAggregator {
         now: Date
     ) throws -> StatsRangeContext {
         let activeSubscriptions = activeSubscriptions(in: subscription, now: now)
-        let recurringWindowSubscriptions = activeSubscriptions.filter { recurringWindowQuota($0) != nil }
-        let weekStarts = recurringWindowSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowStartAt) }
-        let weekEnds = recurringWindowSubscriptions.compactMap { APIDateParser.parse($0.quota?.windowResetAt) }
-        let subscriptionStarts = activeSubscriptions.compactMap { APIDateParser.parse($0.subscriptionStartAt) }
-        let subscriptionEnds = activeSubscriptions.compactMap { APIDateParser.parse($0.subscriptionEndAt) }
+        let monthlySubscription = earliestStartedMonthlySubscription(in: activeSubscriptions)
+        let monthWindowStart = monthlySubscription.flatMap { APIDateParser.parse($0.quota?.windowStartAt) }
+        let monthWindowEnd = monthlySubscription.flatMap { APIDateParser.parse($0.quota?.windowResetAt) }
+        let monthSubscriptionStart = monthlySubscription.flatMap { APIDateParser.parse($0.subscriptionStartAt) }
+        let monthSubscriptionEnd = monthlySubscription.flatMap { APIDateParser.parse($0.subscriptionEndAt) }
 
         var available: [StatsRange] = [.today, .last7Days, .last30Days]
-        let weekStart = weekStarts.min()
-        let weekEnd = weekEnds.max()
-        if weekStart != nil, weekEnd != nil {
+        if monthWindowStart != nil, monthWindowEnd != nil {
             available.insert(.quotaWeek, at: 0)
         }
 
-        let subscriptionStart = subscriptionStarts.min()
-        let subscriptionEnd = subscriptionEnds.max()
-        if subscriptionStart != nil, subscriptionEnd != nil {
+        if monthSubscriptionStart != nil, monthSubscriptionEnd != nil {
             let insertionIndex = available.contains(.quotaWeek) ? 1 : 0
             available.insert(.subscriptionPeriod, at: insertionIndex)
         }
@@ -228,9 +224,9 @@ enum UsageAggregator {
 
         switch effective {
         case .quotaWeek:
-            start = weekStart ?? calendar.startOfDay(for: now)
+            start = monthWindowStart ?? calendar.startOfDay(for: now)
         case .subscriptionPeriod:
-            start = subscriptionStart ?? calendar.startOfDay(for: now)
+            start = monthSubscriptionStart ?? calendar.startOfDay(for: now)
         case .today:
             start = calendar.startOfDay(for: now)
         case .last7Days:
@@ -246,6 +242,26 @@ enum UsageAggregator {
             end: now,
             availableRanges: available
         )
+    }
+
+    private static func earliestStartedMonthlySubscription(in items: [SubscriptionItem]) -> SubscriptionItem? {
+        items
+            .filter(isMonthlyWindowSubscription)
+            .min { lhs, rhs in
+                let lhsStart = APIDateParser.parse(lhs.subscriptionStartAt) ?? .distantFuture
+                let rhsStart = APIDateParser.parse(rhs.subscriptionStartAt) ?? .distantFuture
+                return lhsStart < rhsStart
+            }
+    }
+
+    private static func isMonthlyWindowSubscription(_ item: SubscriptionItem) -> Bool {
+        guard let durationDays = item.plan?.durationDays,
+              durationDays >= 28,
+              durationDays <= 31
+        else {
+            return false
+        }
+        return recurringWindowQuota(item) != nil
     }
 
     static func activeSubscriptions(in envelope: SubscriptionEnvelope, now: Date) -> [SubscriptionItem] {

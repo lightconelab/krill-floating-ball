@@ -18,6 +18,14 @@ Krill Floating Ball is a native macOS desktop widget for monitoring Krill AI sub
 | --- | --- |
 | <img src="docs/images/floating-ball.png" width="160" alt="Floating ball"> | <img src="docs/images/expanded-panel.png" width="760" alt="Expanded panel"> |
 
+### Usage Statistic Ranges
+
+`Monthly Window` covers the current quota window of the earliest active monthly plan. `Monthly Plan` covers the same monthly plan from its active start time to now.
+
+| Monthly Window | Monthly Plan |
+| --- | --- |
+| <img src="docs/images/stats-month-window.png" width="640" alt="Monthly window usage statistics"> | <img src="docs/images/stats-month-plan.png" width="640" alt="Monthly plan usage statistics"> |
+
 ### Edge Progress Bar
 
 When the widget is near a screen edge, it can snap into a progress bar. Left and right edges use a vertical bar, while top and bottom edges use a horizontal bar. Hovering still opens the full information panel.
@@ -48,7 +56,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Always-on-top draggable 80px liquid floating ball.
 - Edge progress bar enabled by default: the widget snaps near screen edges, supports multi-display setups, and can be disabled from the menu bar.
 - Hover panel showing usage statistics, wallet balance, refresh status, and all active subscriptions.
-- Usage statistics ranges: `Quota Week`, `Subscription Period`, `Today`, `7 Days`, and `30 Days`.
+- Usage statistics ranges: `Monthly Window`, `Monthly Plan`, `Today`, `7 Days`, and `30 Days`.
 - Spend, requests, and Tokens include sparklines; cache rate is shown per channel.
 - Configurable automatic refresh interval, defaulting to 30 seconds. The next automatic refresh is scheduled after the previous refresh completes.
 - Manual refresh, launch at login, balance alert ranges, Krill account management, desktop widget visibility, edge progress bar mode, and quit actions from the menu bar.
@@ -99,6 +107,8 @@ Usage statistics are read from Krill request-log stats. The main fields are:
 
 `Today` uses the user's local calendar day. Large ranges are requested in smaller chunks and parsed for only the required fields to reduce peak memory usage when switching ranges.
 
+`Monthly Window` and `Monthly Plan` are available only when an active monthly plan exists, and both use the active monthly plan with the earliest `subscription_start_at`. `Monthly Window` covers that plan's current quota window up to now, while `Monthly Plan` covers that plan's active period start up to now.
+
 ## Requirements
 
 - macOS 13.0 or later.
@@ -145,13 +155,13 @@ Krill Floating Ball is drawn with native AppKit and does not use Electron or Web
 
 Actual CPU, memory, and energy impact depend on the device, macOS version, display scaling, selected statistic range, and API response size. The screenshots below are from one local run and should be treated as rough reference points.
 
-| Floating Ball CPU | Edge Progress Bar CPU |
+| CPU Usage | Memory Usage |
 | --- | --- |
-| <img src="docs/images/floating-ball-cpu.png" width="520" alt="Floating ball CPU usage"> | <img src="docs/images/edge-progress-cpu.png" width="520" alt="Edge progress bar CPU usage"> |
+| <img src="docs/images/floating-ball-cpu.png" width="520" alt="CPU usage"> | <img src="docs/images/memory-usage.png" width="520" alt="Memory usage"> |
 
-| Memory Usage | Energy Impact |
-| --- | --- |
-| <img src="docs/images/memory-usage.png" width="520" alt="Memory usage"> | <img src="docs/images/energy-impact.png" width="520" alt="Energy impact"> |
+<p align="center">
+  <img src="docs/images/energy-impact.png" width="720" alt="Energy impact">
+</p>
 
 ## Privacy
 

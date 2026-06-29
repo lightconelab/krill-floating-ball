@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private lazy var usageStore = UsageStore(keychain: keychain)
     private lazy var floatingController = FloatingBallController(store: usageStore)
-    private let credentialValidationClient = KrillAPIClient()
+    private var credentialValidationClient: KrillAPIClient?
     private var statusItem: NSStatusItem?
     private var refreshIntervalMenuItem: NSMenuItem?
     private var launchAtLoginMenuItem: NSMenuItem?
@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         credentialValidationTask?.cancel()
+        credentialValidationClient = nil
         usageStore.stop()
     }
 
@@ -279,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         didPromptForCredentialFailure = false
         credentialValidationTask?.cancel()
         credentialValidationTask = nil
+        credentialValidationClient = nil
         keychain.deleteCredentials()
         usageStore.credentialsDidChangeAndRefreshNow()
     }
@@ -336,13 +338,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let credentials = KrillCredentials(email: email, password: password)
             controller.setSubmitting(true)
             credentialValidationTask?.cancel()
+            let validationClient = credentialValidationClient ?? KrillAPIClient()
+            credentialValidationClient = validationClient
             credentialValidationTask = Task { [weak self, weak controller] in
                 guard let self, let controller else {
                     return
                 }
 
                 do {
-                    _ = try await credentialValidationClient.login(credentials: credentials)
+                    _ = try await validationClient.login(credentials: credentials)
                     try Task.checkCancellation()
                     try keychain.saveCredentials(credentials)
                     didPromptForCredentialFailure = false
@@ -364,6 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
             credentialValidationTask?.cancel()
             credentialValidationTask = nil
+            credentialValidationClient = nil
             credentialsWindowController = nil
             if completed {
                 if shouldRestoreFloating {
@@ -680,11 +685,11 @@ private final class CredentialsWindowController: NSWindowController, NSWindowDel
         emailInput.placeholderString = "邮箱"
         emailInput.stringValue = existing?.email ?? ""
         emailInput.delegate = self
-        configureCredentialInput(emailInput, contentType: .username)
+        configureCredentialInput(emailInput)
 
         passwordInput.placeholderString = existing == nil ? "密码" : "留空则保留原密码"
         passwordInput.delegate = self
-        configureCredentialInput(passwordInput, contentType: .password)
+        configureCredentialInput(passwordInput)
 
         errorLabel.font = .systemFont(ofSize: 12, weight: .medium)
         errorLabel.textColor = .systemRed
@@ -819,11 +824,8 @@ private final class CredentialsWindowController: NSWindowController, NSWindowDel
 }
 
 @MainActor
-private func configureCredentialInput(_ field: NSTextField, contentType: NSTextContentType) {
+private func configureCredentialInput(_ field: NSTextField) {
     field.translatesAutoresizingMaskIntoConstraints = false
-    if #available(macOS 11.0, *) {
-        field.contentType = contentType
-    }
     field.isAutomaticTextCompletionEnabled = false
     field.usesSingleLineMode = true
     field.allowsEditingTextAttributes = false

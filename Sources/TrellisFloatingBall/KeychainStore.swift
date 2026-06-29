@@ -28,6 +28,9 @@ final class KeychainStore {
 
     let service: String
 
+    private let codingLock = NSLock()
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
     private var didLoadCredentials = false
     private var cachedCredentials: KrillCredentials?
 
@@ -49,7 +52,7 @@ final class KeychainStore {
             return nil
         }
 
-        guard let credentials = try? JSONDecoder().decode(KrillCredentials.self, from: data),
+        guard let credentials = try? decodeCredentials(from: data),
               isValid(credentials)
         else {
             cachedCredentials = nil
@@ -77,7 +80,7 @@ final class KeychainStore {
             password: credentials.password
         )
         guard isValid(normalized),
-              let data = try? JSONEncoder().encode(normalized)
+              let data = try? encodeCredentials(normalized)
         else {
             throw KeychainStoreError.invalidData
         }
@@ -100,6 +103,22 @@ final class KeychainStore {
     private func isValid(_ credentials: KrillCredentials) -> Bool {
         credentials.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             && credentials.password.isEmpty == false
+    }
+
+    private func decodeCredentials(from data: Data) throws -> KrillCredentials {
+        codingLock.lock()
+        defer {
+            codingLock.unlock()
+        }
+        return try decoder.decode(KrillCredentials.self, from: data)
+    }
+
+    private func encodeCredentials(_ credentials: KrillCredentials) throws -> Data {
+        codingLock.lock()
+        defer {
+            codingLock.unlock()
+        }
+        return try encoder.encode(credentials)
     }
 
     private func loadData(account: String) -> Data? {
