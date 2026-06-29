@@ -798,18 +798,18 @@ final class UsageWidgetView: NSView {
         ]
         let sideCards = [
             StatCardContent(
-                title: "缓存率",
-                value: "",
-                icon: .cache,
-                tint: NSColor(hex: 0x0D9F6E),
-                style: .cacheBars
-            ),
-            StatCardContent(
                 title: "钱包余额",
                 value: Formatters.usd(snapshot.walletBalance),
                 icon: .wallet,
                 tint: NSColor(hex: 0xC99700),
                 style: .centeredValue
+            ),
+            StatCardContent(
+                title: "缓存率",
+                value: "",
+                icon: .cache,
+                tint: NSColor(hex: 0x0D9F6E),
+                style: .cacheBars
             )
         ]
 
@@ -819,13 +819,13 @@ final class UsageWidgetView: NSView {
         let usableCardWidth = max(0, content.width - itemGap * 2)
         let metricCardWidth = floor(usableCardWidth * 0.5)
         let sideCardWidth = (usableCardWidth - metricCardWidth) / 2
-        let metricRect = NSRect(x: content.minX, y: cardY, width: metricCardWidth, height: cardHeight)
-        let cacheRect = NSRect(x: metricRect.maxX + itemGap, y: cardY, width: sideCardWidth, height: cardHeight)
-        let walletRect = NSRect(x: cacheRect.maxX + itemGap, y: cardY, width: sideCardWidth, height: cardHeight)
+        let walletRect = NSRect(x: content.minX, y: cardY, width: sideCardWidth, height: cardHeight)
+        let cacheRect = NSRect(x: walletRect.maxX + itemGap, y: cardY, width: sideCardWidth, height: cardHeight)
+        let metricRect = NSRect(x: cacheRect.maxX + itemGap, y: cardY, width: metricCardWidth, height: cardHeight)
 
+        drawStatCard(sideCards[0], rect: walletRect, alpha: alpha)
+        drawStatCard(sideCards[1], rect: cacheRect, alpha: alpha)
         drawUsageMetricCard(metrics, rect: metricRect, alpha: alpha)
-        drawStatCard(sideCards[0], rect: cacheRect, alpha: alpha)
-        drawStatCard(sideCards[1], rect: walletRect, alpha: alpha)
 
         let line = NSBezierPath()
         line.move(to: NSPoint(x: content.minX, y: content.maxY - 1))
