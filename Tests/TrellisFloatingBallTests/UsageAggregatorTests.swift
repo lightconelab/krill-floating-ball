@@ -71,10 +71,12 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(snapshot.weeklyTotal ?? 0, 713, accuracy: 0.000_001)
         XCTAssertEqual(snapshot.weeklyRemaining ?? 0, 176.130690, accuracy: 0.000_001)
         XCTAssertEqual(snapshot.primaryPercent ?? 0, 24.703, accuracy: 0.001)
+        XCTAssertEqual(snapshot.monthlyRemaining ?? 0, 1_376.130690, accuracy: 0.000_001)
 
         let monthlyCard = try XCTUnwrap(snapshot.subscriptions.first { $0.name == "月卡套餐" })
         XCTAssertEqual(monthlyCard.weeklyTotal ?? 0, 600, accuracy: 0.000_001)
         XCTAssertEqual(monthlyCard.monthlyTotal ?? 0, 2_400, accuracy: 0.000_001)
+        XCTAssertEqual(monthlyCard.monthlyRemaining ?? 0, 1_371.871859, accuracy: 0.000_001)
 
         let rewardCard = try XCTUnwrap(snapshot.subscriptions.first { $0.name == "奖励额度" })
         XCTAssertNil(rewardCard.weeklyTotal)

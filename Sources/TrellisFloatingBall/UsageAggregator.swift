@@ -349,10 +349,12 @@ enum UsageAggregator {
     private static func totalQuota(_ item: SubscriptionItem) -> QuotaAmounts? {
         if let recurring = recurringWindowQuota(item) {
             let total = recurring.total * recurringWindowCount(item)
-            let used = decimal(item.totalUsedUsd)
+            let futureWindowCount = recurringFutureWindowCount(item, currentWindowEnd: recurring.end)
+            let remaining = recurring.remaining + (futureWindowCount * recurring.total)
+            let used = max(0, total - remaining)
             return QuotaAmounts(
-                remaining: max(0, total - used),
-                used: max(0, used),
+                remaining: max(0, min(total, remaining)),
+                used: max(0, min(total, used)),
                 total: total,
                 start: APIDateParser.parse(item.subscriptionStartAt),
                 end: APIDateParser.parse(item.subscriptionEndAt)
@@ -399,6 +401,20 @@ enum UsageAggregator {
             return 4
         }
         return max(1, floor(Double(durationDays) / 7))
+    }
+
+    private static func recurringFutureWindowCount(_ item: SubscriptionItem, currentWindowEnd: Date?) -> Double {
+        guard let currentWindowEnd,
+              let subscriptionEnd = APIDateParser.parse(item.subscriptionEndAt),
+              subscriptionEnd > currentWindowEnd
+        else {
+            return 0
+        }
+
+        let remainingInterval = subscriptionEnd.timeIntervalSince(currentWindowEnd)
+        let futureWindowCount = floor(remainingInterval / (7 * 86_400))
+        let maxFutureWindowCount = max(0, recurringWindowCount(item) - 1)
+        return min(maxFutureWindowCount, max(0, futureWindowCount))
     }
 
     private static func hasDecimalValue(_ value: String?) -> Bool {

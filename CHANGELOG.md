@@ -4,9 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Redesigned the usage statistics area into a compact combined metrics card with separate cache-rate and wallet cards.
-- Refined the wallet stat icon color and the menu bar template icon, including a filled upper half, centered vector `K`, and split cut-out divider.
-- Refreshed README screenshots and removed public documentation that exposed internal calculation details or data-source-specific screenshots.
+## v0.2.9 - 2026-07-01
+
+- Corrected the monthly-card remaining-quota display to follow window-based issuance more closely, so current-window remainder and future windows are no longer overcounted.
+- Refreshed the public README screenshots for the menu, floating ball, floating overview, expanded panel, and Krill account dialog.
+- Kept the public documentation free of internal calculation details and data-source-specific explanation.
 
 ## v0.2.8 - 2026-06-29
 
