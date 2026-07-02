@@ -117,7 +117,12 @@ final class UsageStore {
         let generation = refreshGeneration
 
         refreshTask = Task { [weak self] in
-            await self?.load(credentials: credentials, requestedRange: requestedRange, generation: generation)
+            await self?.load(
+                credentials: credentials,
+                requestedRange: requestedRange,
+                generation: generation,
+                manual: manual
+            )
         }
     }
 
@@ -149,7 +154,12 @@ final class UsageStore {
         }
     }
 
-    private func load(credentials: KrillCredentials, requestedRange: StatsRange, generation: Int) async {
+    private func load(
+        credentials: KrillCredentials,
+        requestedRange: StatsRange,
+        generation: Int,
+        manual: Bool
+    ) async {
         var didUpdateSnapshot = false
 
         defer {
@@ -177,7 +187,8 @@ final class UsageStore {
             let bundle = try await fetchWithLogin(
                 credentials: credentials,
                 requestedStatsRange: requestedRange,
-                generation: generation
+                generation: generation,
+                forceCodexModelIQRefresh: manual
             )
             guard isCurrentRefresh(generation: generation, requestedRange: requestedRange) else {
                 return
@@ -220,16 +231,27 @@ final class UsageStore {
     private func fetchWithLogin(
         credentials: KrillCredentials,
         requestedStatsRange: StatsRange,
-        generation: Int
+        generation: Int,
+        forceCodexModelIQRefresh: Bool
     ) async throws -> APIBundle {
         do {
             let token = try await loginIfNeeded(credentials: credentials, force: false)
-            return try await fetchBundle(token: token, requestedStatsRange: requestedStatsRange, generation: generation)
+            return try await fetchBundle(
+                token: token,
+                requestedStatsRange: requestedStatsRange,
+                generation: generation,
+                forceCodexModelIQRefresh: forceCodexModelIQRefresh
+            )
         } catch KrillAPIError.unauthorized {
             cachedToken = nil
             let token = try await loginIfNeeded(credentials: credentials, force: true)
             do {
-                return try await fetchBundle(token: token, requestedStatsRange: requestedStatsRange, generation: generation)
+                return try await fetchBundle(
+                    token: token,
+                    requestedStatsRange: requestedStatsRange,
+                    generation: generation,
+                    forceCodexModelIQRefresh: forceCodexModelIQRefresh
+                )
             } catch KrillAPIError.unauthorized {
                 cachedToken = nil
                 throw KrillAPIError.loginFailed("登录状态已失效，请重新设置 Krill 账号")
@@ -237,7 +259,12 @@ final class UsageStore {
         }
     }
 
-    private func fetchBundle(token: String, requestedStatsRange: StatsRange, generation: Int) async throws -> APIBundle {
+    private func fetchBundle(
+        token: String,
+        requestedStatsRange: StatsRange,
+        generation: Int,
+        forceCodexModelIQRefresh: Bool
+    ) async throws -> APIBundle {
         let subscription = try await client.fetchSubscription(token: token)
         let rangeContext = try UsageAggregator.statsRangeContext(
             subscription: subscription,
@@ -251,7 +278,7 @@ final class UsageStore {
             requestedRange: requestedStatsRange
         )
         let stats = try await client.fetchStats(token: token, range: rangeContext)
-        let codexModelIQ = try? await client.fetchCodexModelIQ()
+        let codexModelIQ = try? await client.fetchCodexModelIQ(forceRefresh: forceCodexModelIQRefresh)
         return APIBundle(
             subscription: subscription,
             stats: stats,

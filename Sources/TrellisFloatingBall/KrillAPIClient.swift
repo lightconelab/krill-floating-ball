@@ -52,7 +52,7 @@ final class KrillAPIClient: @unchecked Sendable {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
         static let codexRadarTimeout: TimeInterval = 5
-        static let codexModelIQCacheTTL: TimeInterval = 600
+        static let codexModelIQCacheTTL: TimeInterval = 120
         static let retryDelayNanoseconds: UInt64 = 350_000_000
         static let sampledTrendLimit = 32
         static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
@@ -138,8 +138,8 @@ final class KrillAPIClient: @unchecked Sendable {
         return envelope
     }
 
-    func fetchCodexModelIQ() async throws -> CodexModelIQSnapshot {
-        if let cached = cachedCodexModelIQIfFresh() {
+    func fetchCodexModelIQ(forceRefresh: Bool = false) async throws -> CodexModelIQSnapshot {
+        if forceRefresh == false, let cached = cachedCodexModelIQIfFresh() {
             return cached
         }
 

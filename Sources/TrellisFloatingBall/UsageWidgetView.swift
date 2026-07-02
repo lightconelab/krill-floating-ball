@@ -80,6 +80,10 @@ final class UsageWidgetView: NSView {
     private let codexModelIQCardHeight: CGFloat = 80
     private let panelContentInset: CGFloat = 20
     private let expandedRightPadding: CGFloat = 16
+    private let codexSectionTopGap: CGFloat = 20
+    private let sectionDividerTopGap: CGFloat = 18
+    private let sectionHeaderHeight: CGFloat = 16
+    private let sectionHeaderBottomGap: CGFloat = 12
 
     private var animationPhase: CGFloat = 0
     private var panelProgress: CGFloat = 0
@@ -1253,7 +1257,7 @@ final class UsageWidgetView: NSView {
 
         let content = NSRect(
             x: rect.minX + panelContentInset,
-            y: rect.minY + panelContentInset + statsSectionHeight() + 20,
+            y: rect.minY + panelContentInset + statsSectionHeight() + codexSectionTopGap,
             width: rect.width - panelContentInset * 2,
             height: codexModelIQSectionHeight()
         )
@@ -1483,10 +1487,10 @@ final class UsageWidgetView: NSView {
 
     private func drawSubscriptionCards(in rect: NSRect, alpha: CGFloat) {
         let listTop = rect.minY + panelListTopOffset()
-        let titleY = listTop - 26
+        let titleY = listTop - sectionHeaderHeight - sectionHeaderBottomGap
         drawText(
             "生效套餐",
-            rect: NSRect(x: rect.minX + panelContentInset + 2, y: titleY, width: 120, height: 16),
+            rect: NSRect(x: rect.minX + panelContentInset + 2, y: titleY, width: 120, height: sectionHeaderHeight),
             font: sectionTitleFont(),
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
@@ -1849,7 +1853,12 @@ final class UsageWidgetView: NSView {
     }
 
     private func panelListTopOffset() -> CGFloat {
-        panelContentInset + statsSectionHeight() + codexModelIQSectionHeight() + 36
+        panelContentInset
+            + statsSectionHeight()
+            + (snapshot.codexModelIQ?.items.isEmpty == false ? codexSectionTopGap + codexModelIQSectionHeight() : 0)
+            + sectionDividerTopGap
+            + sectionHeaderHeight
+            + sectionHeaderBottomGap
     }
 
     private func statsSectionHeight() -> CGFloat {
