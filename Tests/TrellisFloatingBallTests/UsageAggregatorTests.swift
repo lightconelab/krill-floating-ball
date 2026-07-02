@@ -137,6 +137,20 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(payload.channelCacheRates?.first?.cacheRate ?? 0, 0.8123, accuracy: 0.000_001)
     }
 
+    func testCodexModelIQHTMLParserReadsAndSortsScoreCards() throws {
+        let snapshot = try CodexModelIQHTMLParser.parse(codexModelIQHTML)
+
+        XCTAssertEqual(snapshot.updatedAtText, "07-02 07:45")
+        XCTAssertEqual(snapshot.items.map(\.name), [
+            "GPT-5.5-high",
+            "GPT-5.5-medium",
+            "GPT-5.4-high",
+            "GPT-5.5-xhigh",
+            "GPT-5.4-xhigh"
+        ])
+        XCTAssertEqual(snapshot.items.map(\.score), [100.0, 87.5, 87.5, 75.0, 37.5])
+    }
+
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
         let subscription = try decodeSubscription(exhaustedQuotaWithWalletJSON)
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-27T12:00:00Z"))
@@ -447,4 +461,38 @@ private let exhaustedQuotaNoWalletJSON = """
     ]
   }
 }
+"""
+
+private let codexModelIQHTML = """
+<section class="model-iq model-iq-red" aria-label="Codex 雷达">
+  <div class="model-iq-head">
+    <div>
+      <h2>降智雷达 <span>7月2日07:45更新</span><span class="model-iq-actions"></span></h2>
+    </div>
+  </div>
+  <article class="model-iq-score">
+    <div class="model-iq-score-pair">
+      <div class="model-iq-score-chip model-iq-score-chip-primary" data-model-key="gpt_55_xhigh">
+        <span>GPT-5.5-xhigh</span>
+        <strong>75.0</strong>
+      </div>
+      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_high" data-model-key="gpt_55_high">
+        <span>GPT-5.5-high</span>
+        <strong>100.0</strong>
+      </div>
+      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_medium" data-model-key="gpt_55_medium">
+        <span>GPT-5.5-medium</span>
+        <strong>87.5</strong>
+      </div>
+      <div class="model-iq-score-chip model-iq-score-chip-gpt_54_xhigh" data-model-key="gpt_54_xhigh">
+        <span>GPT-5.4-xhigh</span>
+        <strong>37.5</strong>
+      </div>
+      <div class="model-iq-score-chip model-iq-score-chip-gpt_54_high" data-model-key="gpt_54_high">
+        <span>GPT-5.4-high</span>
+        <strong>87.5</strong>
+      </div>
+    </div>
+  </article>
+</section>
 """

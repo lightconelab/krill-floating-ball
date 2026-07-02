@@ -44,12 +44,15 @@ struct APIBundle {
     let subscription: SubscriptionEnvelope
     let stats: StatsEnvelope
     let statsRangeContext: StatsRangeContext
+    let codexModelIQ: CodexModelIQSnapshot?
 }
 
 final class KrillAPIClient: @unchecked Sendable {
     fileprivate enum Network {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
+        static let codexRadarTimeout: TimeInterval = 5
+        static let codexModelIQCacheTTL: TimeInterval = 600
         static let retryDelayNanoseconds: UInt64 = 350_000_000
         static let sampledTrendLimit = 32
         static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
@@ -59,11 +62,14 @@ final class KrillAPIClient: @unchecked Sendable {
     private let loginURL = URL(string: "https://www.krill-ai.com/api/auth/login")!
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
+    private let codexRadarURL = URL(string: "https://codex-reset-radar.pages.dev/")!
     private let session: URLSession
     private let fingerprintStore: KrillFingerprintStore
     private let codingLock = NSLock()
+    private let codexModelIQLock = NSLock()
     private let requestEncoder = JSONEncoder()
     private let responseDecoder = JSONDecoder()
+    private var cachedCodexModelIQ: (snapshot: CodexModelIQSnapshot, fetchedAt: Date)?
 
     init(session: URLSession? = nil, fingerprintStore: KrillFingerprintStore = .shared) {
         self.session = session ?? URLSession(configuration: Self.makeSessionConfiguration())
@@ -130,6 +136,29 @@ final class KrillAPIClient: @unchecked Sendable {
         let envelope = try await fetchStatsChunk(token: token, range: range)
         releaseUnusedHeapMemory()
         return envelope
+    }
+
+    func fetchCodexModelIQ() async throws -> CodexModelIQSnapshot {
+        if let cached = cachedCodexModelIQIfFresh() {
+            return cached
+        }
+
+        var request = URLRequest(url: codexRadarURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = Network.codexRadarTimeout
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "accept-language")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
+        request.setValue("no-cache", forHTTPHeaderField: "cache-control")
+
+        let (data, response) = try await loadData(for: request)
+        try validate(response, data: data, allowUnauthorized: false)
+        guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+            throw KrillAPIError.invalidResponse
+        }
+        let snapshot = try CodexModelIQHTMLParser.parse(html)
+        cacheCodexModelIQ(snapshot)
+        return snapshot
     }
 
     private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
@@ -474,6 +503,25 @@ final class KrillAPIClient: @unchecked Sendable {
     private func releaseUnusedHeapMemory() -> Int {
         malloc_zone_pressure_relief(nil, 0)
     }
+
+    private func cachedCodexModelIQIfFresh(now: Date = Date()) -> CodexModelIQSnapshot? {
+        codexModelIQLock.lock()
+        defer {
+            codexModelIQLock.unlock()
+        }
+        guard let cachedCodexModelIQ,
+              now.timeIntervalSince(cachedCodexModelIQ.fetchedAt) < Network.codexModelIQCacheTTL
+        else {
+            return nil
+        }
+        return cachedCodexModelIQ.snapshot
+    }
+
+    private func cacheCodexModelIQ(_ snapshot: CodexModelIQSnapshot, now: Date = Date()) {
+        codexModelIQLock.lock()
+        cachedCodexModelIQ = (snapshot, now)
+        codexModelIQLock.unlock()
+    }
 }
 
 final class KrillFingerprintStore: @unchecked Sendable {
@@ -554,6 +602,113 @@ enum LocalProtocolDateFormatter {
             lock.unlock()
         }
         return formatter.string(from: date)
+    }
+}
+
+enum CodexModelIQHTMLParser {
+    static func parse(_ html: String) throws -> CodexModelIQSnapshot {
+        let updateText = try extractUpdateText(from: html)
+        let items = try extractItems(from: html)
+        guard items.isEmpty == false else {
+            throw KrillAPIError.missingData
+        }
+
+        let sortedItems = items.enumerated()
+            .sorted { lhs, rhs in
+                if lhs.element.score == rhs.element.score {
+                    return lhs.offset < rhs.offset
+                }
+                return lhs.element.score > rhs.element.score
+            }
+            .map(\.element)
+
+        return CodexModelIQSnapshot(updatedAtText: updateText, items: sortedItems)
+    }
+
+    private static func extractUpdateText(from html: String) throws -> String {
+        let pattern = #"<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?<h2>[\s\S]*?<span[^>]*>([^<]+)</span>"#
+        guard let raw = firstCapture(in: html, pattern: pattern) else {
+            throw KrillAPIError.missingData
+        }
+        return normalizedUpdateText(raw)
+    }
+
+    private static func extractItems(from html: String) throws -> [CodexModelIQItem] {
+        let section = firstCapture(
+            in: html,
+            pattern: #"(<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?</section>)"#
+        ) ?? html
+        let pattern = #"<div[^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*>\s*<span[^>]*>([^<]+)</span>\s*<strong[^>]*>([^<]+)</strong>"#
+        let regex = try NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        )
+        let range = NSRange(section.startIndex..<section.endIndex, in: section)
+        return regex.matches(in: section, range: range).compactMap { match in
+            guard match.numberOfRanges >= 3,
+                  let nameRange = Range(match.range(at: 1), in: section),
+                  let scoreRange = Range(match.range(at: 2), in: section)
+            else {
+                return nil
+            }
+            let name = normalizedText(String(section[nameRange]))
+            let scoreText = normalizedText(String(section[scoreRange]))
+            guard name.isEmpty == false,
+                  let score = Double(scoreText)
+            else {
+                return nil
+            }
+            return CodexModelIQItem(name: name, score: score)
+        }
+    }
+
+    private static func normalizedUpdateText(_ text: String) -> String {
+        let normalized = normalizedText(text)
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})"#,
+            options: []
+        ) else {
+            return normalized
+        }
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        guard let match = regex.firstMatch(in: normalized, range: range),
+              match.numberOfRanges >= 5,
+              let monthRange = Range(match.range(at: 1), in: normalized),
+              let dayRange = Range(match.range(at: 2), in: normalized),
+              let hourRange = Range(match.range(at: 3), in: normalized),
+              let minuteRange = Range(match.range(at: 4), in: normalized),
+              let month = Int(normalized[monthRange]),
+              let day = Int(normalized[dayRange]),
+              let hour = Int(normalized[hourRange]),
+              let minute = Int(normalized[minuteRange])
+        else {
+            return normalized
+        }
+        return String(format: "%02d-%02d %02d:%02d", month, day, hour, minute)
+    }
+
+    private static func firstCapture(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges >= 2,
+              let captureRange = Range(match.range(at: 1), in: text)
+        else {
+            return nil
+        }
+        return String(text[captureRange])
+    }
+
+    private static func normalizedText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

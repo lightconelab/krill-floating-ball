@@ -18,12 +18,13 @@ enum UsageAggregator {
         let recurringWindowEnd: Date?
     }
 
-    static func makeSnapshot(bundle: APIBundle, now: Date = Date()) throws -> UsageSnapshot {
+    static func makeSnapshot(bundle: APIBundle, previous: UsageSnapshot? = nil, now: Date = Date()) throws -> UsageSnapshot {
         try makeSnapshot(
             subscription: bundle.subscription,
             stats: bundle.stats,
             statsRangeContext: bundle.statsRangeContext,
-            previous: nil,
+            previous: previous,
+            codexModelIQ: bundle.codexModelIQ,
             now: now,
             lastRefresh: now,
             isLoading: false,
@@ -43,6 +44,7 @@ enum UsageAggregator {
             stats: nil,
             statsRangeContext: statsRangeContext,
             previous: previous,
+            codexModelIQ: previous.codexModelIQ,
             now: now,
             lastRefresh: previous.lastRefresh,
             isLoading: true,
@@ -56,6 +58,7 @@ enum UsageAggregator {
         stats: StatsEnvelope?,
         statsRangeContext: StatsRangeContext,
         previous: UsageSnapshot?,
+        codexModelIQ: CodexModelIQSnapshot?,
         now: Date,
         lastRefresh: Date?,
         isLoading: Bool,
@@ -150,6 +153,7 @@ enum UsageAggregator {
         let cost = statsPayload.map { decimal($0.totalCostUsd) } ?? previousSnapshot?.todayCost
         let requests = statsPayload?.totalRequests ?? previousSnapshot?.requestCount
         let tokens = statsPayload?.totalTokens ?? previousSnapshot?.totalTokens
+        let modelIQ = codexModelIQ ?? previous?.codexModelIQ
 
         return UsageSnapshot(
             primaryMode: primaryMode,
@@ -175,6 +179,7 @@ enum UsageAggregator {
             statsRange: statsRangeContext.effective,
             availableStatsRanges: statsRangeContext.availableRanges,
             cacheRates: cacheRates,
+            codexModelIQ: modelIQ,
             subscriptions: subscriptionDisplays,
             lastRefresh: lastRefresh,
             isLoading: isLoading,

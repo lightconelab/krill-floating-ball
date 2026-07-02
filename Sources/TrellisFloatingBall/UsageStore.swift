@@ -183,7 +183,7 @@ final class UsageStore {
                 return
             }
 
-            let next = try UsageAggregator.makeSnapshot(bundle: bundle)
+            let next = try UsageAggregator.makeSnapshot(bundle: bundle, previous: snapshot)
             selectedStatsRange = next.statsRange
             snapshot = next
             didUpdateSnapshot = true
@@ -251,7 +251,13 @@ final class UsageStore {
             requestedRange: requestedStatsRange
         )
         let stats = try await client.fetchStats(token: token, range: rangeContext)
-        return APIBundle(subscription: subscription, stats: stats, statsRangeContext: rangeContext)
+        let codexModelIQ = try? await client.fetchCodexModelIQ()
+        return APIBundle(
+            subscription: subscription,
+            stats: stats,
+            statsRangeContext: rangeContext,
+            codexModelIQ: codexModelIQ
+        )
     }
 
     private func publishSubscriptionSnapshot(

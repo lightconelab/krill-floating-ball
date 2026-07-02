@@ -77,6 +77,7 @@ final class UsageWidgetView: NSView {
     private let panelCardGap: CGFloat = 16
     private let panelBottomPadding: CGFloat = 20
     private let statsHeaderHeight: CGFloat = 32
+    private let codexModelIQCardHeight: CGFloat = 80
     private let panelContentInset: CGFloat = 20
     private let expandedRightPadding: CGFloat = 16
 
@@ -680,6 +681,7 @@ final class UsageWidgetView: NSView {
         NSGraphicsContext.saveGraphicsState()
         drawPanelShell(panelRect, state: state, alpha: alpha)
         drawStatsSummary(in: panelRect, state: state, alpha: alpha)
+        drawCodexModelIQSection(in: panelRect, alpha: alpha)
         drawSubscriptionCards(in: panelRect, alpha: alpha)
         NSGraphicsContext.restoreGraphicsState()
     }
@@ -1242,6 +1244,136 @@ final class UsageWidgetView: NSView {
         }
     }
 
+    private func drawCodexModelIQSection(in rect: NSRect, alpha: CGFloat) {
+        guard let codexModelIQ = snapshot.codexModelIQ,
+              codexModelIQ.items.isEmpty == false
+        else {
+            return
+        }
+
+        let content = NSRect(
+            x: rect.minX + panelContentInset,
+            y: rect.minY + panelContentInset + statsSectionHeight() + 20,
+            width: rect.width - panelContentInset * 2,
+            height: codexModelIQSectionHeight()
+        )
+        let titleFont = sectionTitleFont()
+        drawText(
+            "Codex 模型智商",
+            rect: NSRect(x: content.minX + 2, y: content.minY, width: 160, height: 18),
+            font: titleFont,
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
+        )
+        drawText(
+            codexModelIQ.updatedAtText,
+            rect: NSRect(x: content.maxX - 120, y: content.minY + 1, width: 120, height: 16),
+            font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+            color: NSColor(hex: 0x94A3B8).withAlphaComponent(alpha),
+            alignment: .right
+        )
+
+        let items = Array(codexModelIQ.items.prefix(5))
+        let gap: CGFloat = 8
+        let cardY = content.minY + 34
+        let cardWidth = max(70, (content.width - gap * CGFloat(max(0, items.count - 1))) / CGFloat(max(1, items.count)))
+
+        for (index, item) in items.enumerated() {
+            let x = content.minX + CGFloat(index) * (cardWidth + gap)
+            drawCodexModelIQCard(
+                item,
+                index: index,
+                rect: NSRect(x: x, y: cardY, width: cardWidth, height: codexModelIQCardHeight),
+                alpha: alpha
+            )
+        }
+
+        let separatorY = content.minY + codexModelIQSectionHeight() - 1
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: content.minX, y: separatorY))
+        line.line(to: NSPoint(x: content.maxX, y: separatorY))
+        line.lineWidth = 1
+        NSColor(hex: 0xDDE3EB, alpha: alpha).setStroke()
+        line.stroke()
+    }
+
+    private func drawCodexModelIQCard(
+        _ item: CodexModelIQItem,
+        index: Int,
+        rect: NSRect,
+        alpha: CGFloat
+    ) {
+        drawStatCardShell(in: rect, alpha: alpha)
+
+        let tint = codexModelIQColor(index: index).withAlphaComponent(alpha)
+        let labelBackground = codexModelIQLabelBackground(index: index).withAlphaComponent(alpha)
+        let labelRect = NSRect(x: rect.minX + 10, y: rect.minY + 9, width: rect.width - 20, height: 22)
+        let labelPath = NSBezierPath(roundedRect: labelRect, xRadius: 8, yRadius: 8)
+        labelBackground.setFill()
+        labelPath.fill()
+
+        drawText(
+            item.name,
+            rect: NSRect(x: labelRect.minX + 5, y: labelRect.minY + 5, width: labelRect.width - 10, height: 12),
+            font: fittedSystemFont(
+                text: item.name,
+                maxSize: 10.4,
+                minSize: 8.4,
+                width: labelRect.width - 10,
+                weight: .bold
+            ),
+            color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
+            alignment: .center
+        )
+
+        let scoreText = String(format: "%.1f", item.score)
+        let scoreRect = NSRect(x: rect.minX + 6, y: rect.minY + 42, width: rect.width - 12, height: 32)
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.12 * alpha)
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.shadowBlurRadius = 2
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        let font = fittedMonospacedFont(
+            text: scoreText,
+            maxSize: 27,
+            minSize: 20,
+            width: scoreRect.width,
+            weight: .heavy
+        )
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: tint,
+            .strokeColor: tint,
+            .strokeWidth: -1.8,
+            .paragraphStyle: style,
+            .shadow: shadow
+        ]
+        (scoreText as NSString).draw(in: scoreRect, withAttributes: attributes)
+    }
+
+    private func codexModelIQColor(index: Int) -> NSColor {
+        let palette = [
+            NSColor(hex: 0xEF233C),
+            NSColor(hex: 0x2563EB),
+            NSColor(hex: 0x16A34A),
+            NSColor(hex: 0x00A7C7),
+            NSColor(hex: 0xFACC15)
+        ]
+        return palette[index % palette.count]
+    }
+
+    private func codexModelIQLabelBackground(index: Int) -> NSColor {
+        let palette = [
+            NSColor(hex: 0xFFE7EC),
+            NSColor(hex: 0xE6EEFF),
+            NSColor(hex: 0xE8F8EE),
+            NSColor(hex: 0xDFFAFF),
+            NSColor(hex: 0xFFF8D6)
+        ]
+        return palette[index % palette.count]
+    }
+
     private func cacheRateColor(index: Int) -> NSColor {
         let palette = [
             NSColor(hex: 0x0D9F6E),
@@ -1717,11 +1849,18 @@ final class UsageWidgetView: NSView {
     }
 
     private func panelListTopOffset() -> CGFloat {
-        panelContentInset + statsSectionHeight() + 36
+        panelContentInset + statsSectionHeight() + codexModelIQSectionHeight() + 36
     }
 
     private func statsSectionHeight() -> CGFloat {
         statsHeaderHeight + statsCardHeight() + 16
+    }
+
+    private func codexModelIQSectionHeight() -> CGFloat {
+        guard snapshot.codexModelIQ?.items.isEmpty == false else {
+            return 0
+        }
+        return 136
     }
 
     private func statsCardHeight() -> CGFloat {
@@ -1733,7 +1872,12 @@ final class UsageWidgetView: NSView {
     }
 
     private func preferredPanelWidth(maxWidth: CGFloat? = nil) -> CGFloat {
-        let calculatedWidth = max(panelMinWidth, preferredSubscriptionContentWidth(), preferredStatsContentWidth())
+        let calculatedWidth = max(
+            panelMinWidth,
+            preferredSubscriptionContentWidth(),
+            preferredStatsContentWidth(),
+            preferredCodexModelIQContentWidth()
+        )
         let availableWidth = maxWidth.map { max(panelCompactMinWidth, $0) } ?? panelMaxWidth
         return min(calculatedWidth, min(panelMaxWidth, availableWidth))
     }
@@ -1798,6 +1942,31 @@ final class UsageWidgetView: NSView {
             walletCardWidth * 4
         ) + 8 * 2
         return max(headerWidth, cardsWidth) + panelContentInset * 2
+    }
+
+    private func preferredCodexModelIQContentWidth() -> CGFloat {
+        guard let items = snapshot.codexModelIQ?.items,
+              items.isEmpty == false
+        else {
+            return panelMinWidth
+        }
+
+        let visibleItems = Array(items.prefix(5))
+        let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
+        let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
+        let cardWidth = visibleItems.reduce(CGFloat(96)) { width, item in
+            max(
+                width,
+                measuredWidth(item.name, font: nameFont) + 30,
+                measuredWidth(String(format: "%.1f", item.score), font: scoreFont) + 18
+            )
+        }
+        let contentWidth = cardWidth * CGFloat(visibleItems.count)
+            + CGFloat(max(0, visibleItems.count - 1)) * 8
+        let titleWidth = measuredWidth("Codex 模型智商", font: sectionTitleFont())
+            + 16
+            + measuredWidth("00-00 00:00", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold))
+        return max(contentWidth, titleWidth) + panelContentInset * 2
     }
 
     private func statsRangeButtonWidths(font: NSFont = .systemFont(ofSize: 10.5, weight: .semibold)) -> [CGFloat] {

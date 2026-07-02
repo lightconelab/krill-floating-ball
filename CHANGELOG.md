@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.2.10 - 2026-07-02
+
+- Added the Codex model IQ ranking module to the expanded panel, with horizontally sorted native cards and lightweight cached fetching.
+- Kept the Codex IQ fetch path native and low overhead, without WebKit, Safari, JavaScriptCore, or web-content helper processes.
+- Refreshed the public README screenshots for the expanded panel, floating overview, edge progress overview, menu actions, and the new Codex IQ module.
+- Kept the Codex IQ documentation focused on the visible UI and avoided exposing data-source-specific implementation details.
+
 ## v0.2.9 - 2026-07-01
 
 - Corrected the monthly-card remaining-quota display to follow window-based issuance more closely, so current-window remainder and future windows are no longer overcounted.

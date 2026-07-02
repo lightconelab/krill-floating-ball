@@ -124,6 +124,16 @@ struct UsageTrendPoint: Equatable {
     let tokens: Int?
 }
 
+struct CodexModelIQItem: Equatable {
+    let name: String
+    let score: Double
+}
+
+struct CodexModelIQSnapshot: Equatable {
+    let updatedAtText: String
+    let items: [CodexModelIQItem]
+}
+
 struct SubscriptionDisplayItem: Equatable {
     let name: String
     let start: Date?
@@ -171,6 +181,7 @@ struct UsageSnapshot: Equatable {
     var statsRange: StatsRange
     var availableStatsRanges: [StatsRange]
     var cacheRates: [CacheRate]
+    var codexModelIQ: CodexModelIQSnapshot?
     var subscriptions: [SubscriptionDisplayItem]
 
     var lastRefresh: Date?
@@ -234,6 +245,7 @@ struct UsageSnapshot: Equatable {
         statsRange: .today,
         availableStatsRanges: [.today, .last7Days, .last30Days],
         cacheRates: [],
+        codexModelIQ: nil,
         subscriptions: [],
         lastRefresh: nil,
         isLoading: false,

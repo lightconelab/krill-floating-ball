@@ -2,7 +2,7 @@
 
 [中文简体](README.md) | English
 
-Krill Floating Ball is a native macOS desktop widget for monitoring Krill AI subscription quota, usage statistics, cache rate, and wallet balance. It shows the current quota level as an 80px liquid floating ball, can snap to a slim edge progress bar near screen borders, and expands into a detailed hover panel.
+Krill Floating Ball is a native macOS desktop widget for monitoring Krill AI subscription quota, usage statistics, cache rate, wallet balance, and Codex model IQ rankings. It shows the current quota level as an 80px liquid floating ball, can snap to a slim edge progress bar near screen borders, and expands into a detailed hover panel.
 
 > This project is an unofficial desktop companion for Krill AI. It is not affiliated with or endorsed by Krill AI. Quota, wallet, and usage values in screenshots are examples only.
 
@@ -17,6 +17,12 @@ Krill Floating Ball is a native macOS desktop widget for monitoring Krill AI sub
 | Floating Ball | Expanded Panel |
 | --- | --- |
 | <img src="docs/images/floating-ball.png" width="160" alt="Floating ball"> | <img src="docs/images/expanded-panel.png" width="760" alt="Expanded panel"> |
+
+### Codex Model IQ
+
+<p align="center">
+  <img src="docs/images/codex-model-iq.png" width="760" alt="Codex model IQ ranking">
+</p>
 
 ### Edge Progress Bar
 
@@ -44,6 +50,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Hover panel showing usage statistics, wallet balance, refresh status, and all active subscriptions.
 - Usage statistics ranges: `Monthly Window`, `Monthly Plan`, `Today`, `7 Days`, and `30 Days`.
 - Spend, requests, and Tokens include sparklines; cache rate is shown per channel.
+- The expanded panel can show a horizontal Codex model IQ ranking sorted from high to low.
 - Configurable automatic refresh interval, defaulting to 30 seconds. The next automatic refresh is scheduled after the previous refresh completes.
 - Manual refresh, launch at login, balance alert ranges, Krill account management, desktop widget visibility, edge progress bar mode, and quit actions from the menu bar.
 - Failed refreshes keep the last successful data and show a status badge beside the refresh time without overwriting the last successful refresh timestamp.
@@ -51,7 +58,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 
 ## What It Shows
 
-- The expanded panel shows usage statistics, cache rate, wallet balance, refresh status, and active subscriptions.
+- The expanded panel shows usage statistics, Codex model IQ, cache rate, wallet balance, refresh status, and active subscriptions.
 - Active subscription cards show plan name, time range, quota progress, and remaining time.
 - The floating ball and edge progress bar provide a quick visual status indicator; the expanded panel remains the detailed view.
 - Wallet balance is shown separately from subscription cards.
