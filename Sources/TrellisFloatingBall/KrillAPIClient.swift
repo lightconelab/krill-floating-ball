@@ -62,7 +62,8 @@ final class KrillAPIClient: @unchecked Sendable {
     private let loginURL = URL(string: "https://www.krill-ai.com/api/auth/login")!
     private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
     private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
-    private let codexRadarURL = URL(string: "https://codex-reset-radar.pages.dev/")!
+    private let codexRadarHTMLURL = URL(string: "https://codexradar.com/")!
+    private let codexRadarSummaryURL = URL(string: "https://codexradar.com/current.json")!
     private let session: URLSession
     private let fingerprintStore: KrillFingerprintStore
     private let codingLock = NSLock()
@@ -143,22 +144,48 @@ final class KrillAPIClient: @unchecked Sendable {
             return cached
         }
 
-        var request = URLRequest(url: codexRadarURL)
+        do {
+            let snapshot = try await fetchCodexModelIQFromHTML()
+            cacheCodexModelIQ(snapshot)
+            return snapshot
+        } catch {
+            let snapshot = try await fetchCodexModelIQFromSummary()
+            cacheCodexModelIQ(snapshot)
+            return snapshot
+        }
+    }
+
+    private func fetchCodexModelIQFromHTML() async throws -> CodexModelIQSnapshot {
+        var request = URLRequest(url: codexRadarHTMLURL)
         request.httpMethod = "GET"
         request.timeoutInterval = Network.codexRadarTimeout
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "accept")
         request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "accept-language")
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
         request.setValue("no-cache", forHTTPHeaderField: "cache-control")
+        request.setValue("no-cache", forHTTPHeaderField: "pragma")
 
         let (data, response) = try await loadData(for: request)
         try validate(response, data: data, allowUnauthorized: false)
         guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
             throw KrillAPIError.invalidResponse
         }
-        let snapshot = try CodexModelIQHTMLParser.parse(html)
-        cacheCodexModelIQ(snapshot)
-        return snapshot
+        return try CodexModelIQHTMLParser.parse(html)
+    }
+
+    private func fetchCodexModelIQFromSummary() async throws -> CodexModelIQSnapshot {
+        var request = URLRequest(url: codexRadarSummaryURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = Network.codexRadarTimeout
+        request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "accept-language")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
+        request.setValue("no-cache", forHTTPHeaderField: "cache-control")
+        request.setValue("no-cache", forHTTPHeaderField: "pragma")
+
+        let (data, response) = try await loadData(for: request)
+        try validate(response, data: data, allowUnauthorized: false)
+        return try CodexModelIQSummaryJSONParser.parse(data)
     }
 
     private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
@@ -638,7 +665,7 @@ enum CodexModelIQHTMLParser {
             in: html,
             pattern: #"(<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?</section>)"#
         ) ?? html
-        let pattern = #"<div[^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*>\s*<span[^>]*>([^<]+)</span>\s*<strong[^>]*>([^<]+)</strong>"#
+        let pattern = #"<div[^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*>[\s\S]*?<span[^>]*>([^<]+)</span>[\s\S]*?<strong[^>]*>([^<]+)</strong>[\s\S]*?</div>"#
         let regex = try NSRegularExpression(
             pattern: pattern,
             options: [.caseInsensitive, .dotMatchesLineSeparators]
@@ -712,6 +739,132 @@ enum CodexModelIQHTMLParser {
     }
 }
 
+enum CodexModelIQSummaryJSONParser {
+    static func parse(_ data: Data) throws -> CodexModelIQSnapshot {
+        let envelope = try JSONDecoder().decode(CodexRadarSummaryEnvelope.self, from: data)
+        guard let modelIQ = envelope.modelIQ else {
+            throw KrillAPIError.missingData
+        }
+
+        var items: [CodexModelIQItem] = []
+        if let latest = modelIQ.latest {
+            items.append(CodexModelIQItem(name: normalizedModelName(label: nil, latest: latest), score: latest.score))
+        }
+        if let comparisons = modelIQ.comparisons {
+            items.append(contentsOf: comparisons.values.compactMap { comparison in
+                guard let latest = comparison.latest else {
+                    return nil
+                }
+                return CodexModelIQItem(
+                    name: normalizedModelName(label: comparison.label, latest: latest),
+                    score: latest.score
+                )
+            })
+        }
+
+        guard items.isEmpty == false else {
+            throw KrillAPIError.missingData
+        }
+
+        let sortedItems = items.enumerated()
+            .sorted { lhs, rhs in
+                if lhs.element.score == rhs.element.score {
+                    let lhsRank = modelDisplayRank(lhs.element.name)
+                    let rhsRank = modelDisplayRank(rhs.element.name)
+                    if lhsRank == rhsRank {
+                        return lhs.offset < rhs.offset
+                    }
+                    return lhsRank < rhsRank
+                }
+                return lhs.element.score > rhs.element.score
+            }
+            .map(\.element)
+
+        let updatedAtText = RadarUpdateFormatter.format(
+            iso8601: envelope.quotaRadar?.updatedAt,
+            fallbackDateCode: modelIQ.latest?.date
+        )
+        return CodexModelIQSnapshot(updatedAtText: updatedAtText, items: sortedItems)
+    }
+
+    private static func normalizedModelName(label: String?, latest: CodexRadarModelSnapshot) -> String {
+        if let label, label.isEmpty == false {
+            return label.replacingOccurrences(of: " ", with: "-")
+        }
+        let model = latest.model.uppercased()
+        let effort = latest.reasoningEffort.lowercased()
+        return "\(model)-\(effort)"
+    }
+
+    private static func modelDisplayRank(_ name: String) -> Int {
+        switch name.lowercased() {
+        case "gpt-5.5-xhigh":
+            return 0
+        case "gpt-5.5-high":
+            return 1
+        case "gpt-5.5-medium":
+            return 2
+        case "gpt-5.5-low":
+            return 3
+        case "gpt-5.4-xhigh":
+            return 4
+        case "gpt-5.4-high":
+            return 5
+        default:
+            return 99
+        }
+    }
+}
+
+private enum RadarUpdateFormatter {
+    private static let formatterLock = NSLock()
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter
+    }()
+
+    static func format(iso8601: String?, fallbackDateCode: String?) -> String {
+        if let iso8601,
+           let date = parseISO8601(iso8601) {
+            formatterLock.lock()
+            defer { formatterLock.unlock() }
+            return formatter.string(from: date)
+        }
+        if let fallbackDateCode, fallbackDateCode.isEmpty == false {
+            return normalizedFallbackDateCode(fallbackDateCode)
+        }
+        return "--"
+    }
+
+    private static func normalizedFallbackDateCode(_ text: String) -> String {
+        let normalized = text.replacingOccurrences(of: "_", with: "-")
+        let parts = normalized.split(separator: "-")
+        guard parts.count >= 3,
+              let month = Int(parts[1]),
+              let day = Int(parts[2])
+        else {
+            return text
+        }
+        return String(format: "%02d-%02d --:--", month, day)
+    }
+
+    private static func parseISO8601(_ text: String) -> Date? {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        isoFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        if let date = isoFormatter.date(from: text) {
+            return date
+        }
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        fallbackFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return fallbackFormatter.date(from: text)
+    }
+}
+
 struct SubscriptionEnvelope: Decodable {
     let code: Int?
     let data: SubscriptionPayload?
@@ -731,6 +884,48 @@ struct SubscriptionEnvelope: Decodable {
         case data
         case message
         case success
+    }
+}
+
+private struct CodexRadarSummaryEnvelope: Decodable {
+    let modelIQ: CodexRadarModelIQSummary?
+    let quotaRadar: CodexRadarQuotaRadarSummary?
+
+    enum CodingKeys: String, CodingKey {
+        case modelIQ = "model_iq"
+        case quotaRadar = "quota_radar"
+    }
+}
+
+private struct CodexRadarModelIQSummary: Decodable {
+    let latest: CodexRadarModelSnapshot?
+    let comparisons: [String: CodexRadarModelComparison]?
+}
+
+private struct CodexRadarModelComparison: Decodable {
+    let label: String?
+    let latest: CodexRadarModelSnapshot?
+}
+
+private struct CodexRadarModelSnapshot: Decodable {
+    let date: String?
+    let score: Double
+    let model: String
+    let reasoningEffort: String
+
+    enum CodingKeys: String, CodingKey {
+        case date
+        case score
+        case model
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
+private struct CodexRadarQuotaRadarSummary: Decodable {
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case updatedAt = "updated_at"
     }
 }
 

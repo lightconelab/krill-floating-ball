@@ -151,6 +151,21 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(snapshot.items.map(\.score), [100.0, 87.5, 87.5, 75.0, 37.5])
     }
 
+    func testCodexModelIQSummaryJSONParserReadsLatestSnapshot() throws {
+        let snapshot = try CodexModelIQSummaryJSONParser.parse(Data(codexModelIQSummaryJSON.utf8))
+
+        XCTAssertEqual(snapshot.updatedAtText, "07-03 07:16")
+        XCTAssertEqual(snapshot.items.map(\.name), [
+            "GPT-5.5-xhigh",
+            "GPT-5.5-high",
+            "GPT-5.4-xhigh",
+            "GPT-5.5-medium",
+            "GPT-5.4-high",
+            "GPT-5.5-low"
+        ])
+        XCTAssertEqual(snapshot.items.map(\.score), [105.0, 90.0, 90.0, 75.0, 75.0, 60.0])
+    }
+
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
         let subscription = try decodeSubscription(exhaustedQuotaWithWalletJSON)
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-27T12:00:00Z"))
@@ -474,25 +489,88 @@ private let codexModelIQHTML = """
     <div class="model-iq-score-pair">
       <div class="model-iq-score-chip model-iq-score-chip-primary" data-model-key="gpt_55_xhigh">
         <span>GPT-5.5-xhigh</span>
-        <strong>75.0</strong>
+        <div class="model-iq-score-metrics"><strong>75.0</strong><span class="model-iq-score-mini">$31.7</span></div>
       </div>
       <div class="model-iq-score-chip model-iq-score-chip-gpt_55_high" data-model-key="gpt_55_high">
         <span>GPT-5.5-high</span>
-        <strong>100.0</strong>
+        <div class="model-iq-score-metrics"><strong>100.0</strong><span class="model-iq-score-mini">$22.9</span></div>
       </div>
       <div class="model-iq-score-chip model-iq-score-chip-gpt_55_medium" data-model-key="gpt_55_medium">
         <span>GPT-5.5-medium</span>
-        <strong>87.5</strong>
+        <div class="model-iq-score-metrics"><strong>87.5</strong><span class="model-iq-score-mini">$19.5</span></div>
       </div>
       <div class="model-iq-score-chip model-iq-score-chip-gpt_54_xhigh" data-model-key="gpt_54_xhigh">
         <span>GPT-5.4-xhigh</span>
-        <strong>37.5</strong>
+        <div class="model-iq-score-metrics"><strong>37.5</strong><span class="model-iq-score-mini">$18.4</span></div>
       </div>
       <div class="model-iq-score-chip model-iq-score-chip-gpt_54_high" data-model-key="gpt_54_high">
         <span>GPT-5.4-high</span>
-        <strong>87.5</strong>
+        <div class="model-iq-score-metrics"><strong>87.5</strong><span class="model-iq-score-mini">$15.0</span></div>
       </div>
     </div>
   </article>
 </section>
+"""
+
+private let codexModelIQSummaryJSON = """
+{
+  "model_iq": {
+    "latest": {
+      "date": "2026-07-03-am",
+      "score": 105.0,
+      "model": "gpt-5.5",
+      "reasoning_effort": "xhigh"
+    },
+    "comparisons": {
+      "gpt_55_high": {
+        "label": "GPT-5.5 high",
+        "latest": {
+          "date": "2026-07-03-am",
+          "score": 90.0,
+          "model": "gpt-5.5",
+          "reasoning_effort": "high"
+        }
+      },
+      "gpt_55_medium": {
+        "label": "GPT-5.5 medium",
+        "latest": {
+          "date": "2026-07-03-am",
+          "score": 75.0,
+          "model": "gpt-5.5",
+          "reasoning_effort": "medium"
+        }
+      },
+      "gpt_55_low": {
+        "label": "GPT-5.5 low",
+        "latest": {
+          "date": "2026-07-03-am",
+          "score": 60.0,
+          "model": "gpt-5.5",
+          "reasoning_effort": "low"
+        }
+      },
+      "gpt_54_xhigh": {
+        "label": "GPT-5.4 xhigh",
+        "latest": {
+          "date": "2026-07-03-am",
+          "score": 90.0,
+          "model": "gpt-5.4",
+          "reasoning_effort": "xhigh"
+        }
+      },
+      "gpt_54_high": {
+        "label": "GPT-5.4 high",
+        "latest": {
+          "date": "2026-07-03-am",
+          "score": 75.0,
+          "model": "gpt-5.4",
+          "reasoning_effort": "high"
+        }
+      }
+    }
+  },
+  "quota_radar": {
+    "updated_at": "2026-07-02T23:16:02Z"
+  }
+}
 """
