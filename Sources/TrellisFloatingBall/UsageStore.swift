@@ -11,6 +11,17 @@ final class UsageStore {
         static let minimumRefreshIntervalSeconds = 5
     }
 
+    private enum RefreshReason: Int {
+        case automatic = 0
+        case credentialsChanged = 1
+        case statsRangeChanged = 2
+        case manual = 3
+
+        var bypassCodexModelIQCache: Bool {
+            self == .manual
+        }
+    }
+
     private let keychain: KeychainStore
     private let client = KrillAPIClient()
     private var timer: Timer?
@@ -18,7 +29,7 @@ final class UsageStore {
     private var snapshot = UsageSnapshot.placeholder
     private var isRunning = false
     private var isRefreshing = false
-    private var needsRefreshAfterCurrent = false
+    private var queuedRefreshReason: RefreshReason?
     private var refreshGeneration = 0
     private var refreshIntervalSeconds: Int
     private var selectedStatsRange: StatsRange = .today
@@ -35,7 +46,7 @@ final class UsageStore {
     func start() {
         isRunning = true
         emit()
-        refresh(manual: false)
+        refresh(reason: .automatic)
     }
 
     func stop() {
@@ -77,7 +88,7 @@ final class UsageStore {
             snapshot.lastError = nil
             emit()
         }
-        refresh(manual: true)
+        refresh(reason: .statsRangeChanged)
     }
 
     func credentialsDidChangeAndRefreshNow() {
@@ -86,11 +97,15 @@ final class UsageStore {
         if keychain.hasStoredCredentials() == false {
             selectedStatsRange = .today
         }
-        refresh(manual: true)
+        refresh(reason: .credentialsChanged)
     }
 
     func refresh(manual: Bool) {
-        guard isRunning || manual else {
+        refresh(reason: manual ? .manual : .automatic)
+    }
+
+    private func refresh(reason: RefreshReason) {
+        guard isRunning || reason != .automatic else {
             return
         }
 
@@ -98,9 +113,7 @@ final class UsageStore {
         timer = nil
 
         guard isRefreshing == false else {
-            if manual {
-                needsRefreshAfterCurrent = true
-            }
+            queueRefresh(reason)
             return
         }
 
@@ -121,7 +134,7 @@ final class UsageStore {
                 credentials: credentials,
                 requestedRange: requestedRange,
                 generation: generation,
-                manual: manual
+                reason: reason
             )
         }
     }
@@ -158,7 +171,7 @@ final class UsageStore {
         credentials: KrillCredentials,
         requestedRange: StatsRange,
         generation: Int,
-        manual: Bool
+        reason: RefreshReason
     ) async {
         var didUpdateSnapshot = false
 
@@ -166,13 +179,12 @@ final class UsageStore {
             if generation == refreshGeneration {
                 isRefreshing = false
                 refreshTask = nil
-                let shouldRefreshAgain = needsRefreshAfterCurrent
-                needsRefreshAfterCurrent = false
-                if shouldRefreshAgain, isRunning {
+                if let queuedRefreshReason, isRunning {
+                    self.queuedRefreshReason = nil
                     if didUpdateSnapshot {
                         emit()
                     }
-                    refresh(manual: false)
+                    refresh(reason: queuedRefreshReason)
                 } else {
                     if didUpdateSnapshot {
                         emit()
@@ -188,7 +200,7 @@ final class UsageStore {
                 credentials: credentials,
                 requestedStatsRange: requestedRange,
                 generation: generation,
-                forceCodexModelIQRefresh: manual
+                forceCodexModelIQRefresh: reason.bypassCodexModelIQCache
             )
             guard isCurrentRefresh(generation: generation, requestedRange: requestedRange) else {
                 return
@@ -220,12 +232,22 @@ final class UsageStore {
 
     private func cancelCurrentRefreshForImmediateReplacement() {
         refreshGeneration += 1
-        needsRefreshAfterCurrent = false
+        queuedRefreshReason = nil
         timer?.invalidate()
         timer = nil
         refreshTask?.cancel()
         refreshTask = nil
         isRefreshing = false
+    }
+
+    private func queueRefresh(_ reason: RefreshReason) {
+        guard let queuedRefreshReason else {
+            self.queuedRefreshReason = reason
+            return
+        }
+        if reason.rawValue > queuedRefreshReason.rawValue {
+            self.queuedRefreshReason = reason
+        }
     }
 
     private func fetchWithLogin(

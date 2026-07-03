@@ -170,7 +170,9 @@ final class KrillAPIClient: @unchecked Sendable {
         guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
             throw KrillAPIError.invalidResponse
         }
-        return try CodexModelIQHTMLParser.parse(html)
+        return try autoreleasepool {
+            try CodexModelIQHTMLParser.parse(html)
+        }
     }
 
     private func fetchCodexModelIQFromSummary() async throws -> CodexModelIQSnapshot {
@@ -185,7 +187,9 @@ final class KrillAPIClient: @unchecked Sendable {
 
         let (data, response) = try await loadData(for: request)
         try validate(response, data: data, allowUnauthorized: false)
-        return try CodexModelIQSummaryJSONParser.parse(data)
+        return try autoreleasepool {
+            try CodexModelIQSummaryJSONParser.parse(data)
+        }
     }
 
     private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
@@ -1213,7 +1217,7 @@ private struct CacheRateAccumulator {
 enum StatsJSONParser {
     static func decodeEnvelope(from fileURL: URL, trendLimit: Int) throws -> StatsEnvelope {
         try autoreleasepool {
-            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+            let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe, .uncached])
             var scanner = JSONScanner(data: data, trendLimit: trendLimit)
             return try scanner.parseStatsEnvelope()
         }

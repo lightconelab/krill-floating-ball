@@ -17,6 +17,58 @@ final class UsageWidgetView: NSView {
         case vertical
     }
 
+    private struct MeasuredWidthKey: Hashable {
+        let text: String
+        let fontName: String
+        let pointSizeTenths: Int
+    }
+
+    private struct FittedFontKey: Hashable {
+        let text: String
+        let maxSizeTenths: Int
+        let minSizeTenths: Int
+        let widthTenths: Int
+        let weightTenths: Int
+    }
+
+    private struct LayoutMetrics {
+        let preferredPanelHeight: CGFloat
+        let statsCardHeight: CGFloat
+        let statsSectionHeight: CGFloat
+        let codexSectionHeight: CGFloat
+        let panelListTopOffset: CGFloat
+        let preferredSubscriptionContentWidth: CGFloat
+        let preferredStatsContentWidth: CGFloat
+        let preferredCodexModelIQContentWidth: CGFloat
+        let preferredPanelWidth: CGFloat
+    }
+
+    private enum LayoutCacheLimits {
+        static let measuredWidthEntries = 512
+        static let fittedFontEntries = 160
+    }
+
+    private static let leftParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .left
+        style.lineBreakMode = .byTruncatingTail
+        return style.copy() as! NSParagraphStyle
+    }()
+
+    private static let centerParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        return style.copy() as! NSParagraphStyle
+    }()
+
+    private static let rightParagraphStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .right
+        style.lineBreakMode = .byTruncatingTail
+        return style.copy() as! NSParagraphStyle
+    }()
+
     var expansionChanged: ((Bool) -> Void)?
     var dragBeganAction: (() -> Void)?
     var dragUpdatedAction: ((NSRect) -> NSRect)?
@@ -28,6 +80,7 @@ final class UsageWidgetView: NSView {
             guard oldValue != ballPresentation else {
                 return
             }
+            invalidateLayoutMetrics()
             needsDisplay = true
             updateAnimationScheduling()
         }
@@ -47,6 +100,7 @@ final class UsageWidgetView: NSView {
             guard shouldRedrawSnapshotChange(from: oldValue, to: snapshot) else {
                 return
             }
+            invalidateLayoutMetrics()
             needsDisplay = true
             updateAnimationScheduling()
         }
@@ -97,6 +151,10 @@ final class UsageWidgetView: NSView {
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
     private var balanceThresholds = BalanceThresholds.load()
+    private var measuredWidthCache: [MeasuredWidthKey: CGFloat] = [:]
+    private var fittedMonospacedFontCache: [FittedFontKey: NSFont] = [:]
+    private var fittedSystemFontCache: [FittedFontKey: NSFont] = [:]
+    private var cachedLayoutMetrics: LayoutMetrics?
     private let displayMode: DisplayMode
 
     init(frame frameRect: NSRect, displayMode: DisplayMode = .ball) {
@@ -131,6 +189,7 @@ final class UsageWidgetView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         updateLayerScale()
+        invalidateTextCaches()
         needsDisplay = true
     }
 
@@ -234,19 +293,21 @@ final class UsageWidgetView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.clear.setFill()
-        dirtyRect.fill()
+        autoreleasepool {
+            NSColor.clear.setFill()
+            dirtyRect.fill()
 
-        switch displayMode {
-        case .ball:
-            switch ballPresentation {
-            case .sphere:
-                drawLiquidBall()
-            case .edgeProgressBar:
-                drawEdgeProgressBar()
+            switch displayMode {
+            case .ball:
+                switch ballPresentation {
+                case .sphere:
+                    drawLiquidBall()
+                case .edgeProgressBar:
+                    drawEdgeProgressBar()
+                }
+            case .panel:
+                drawExpandedPanel(progress: 1)
             }
-        case .panel:
-            drawExpandedPanel(progress: 1)
         }
     }
 
@@ -273,7 +334,183 @@ final class UsageWidgetView: NSView {
 
     func reloadPreferences() {
         balanceThresholds = BalanceThresholds.load()
+        invalidateLayoutMetrics()
         needsDisplay = true
+    }
+
+    private func invalidateLayoutMetrics() {
+        cachedLayoutMetrics = nil
+    }
+
+    private func invalidateTextCaches() {
+        measuredWidthCache.removeAll(keepingCapacity: true)
+        fittedMonospacedFontCache.removeAll(keepingCapacity: true)
+        fittedSystemFontCache.removeAll(keepingCapacity: true)
+        invalidateLayoutMetrics()
+    }
+
+    private func makeMeasuredWidthKey(text: String, font: NSFont) -> MeasuredWidthKey {
+        MeasuredWidthKey(
+            text: text,
+            fontName: font.fontName,
+            pointSizeTenths: quantizedTenths(font.pointSize)
+        )
+    }
+
+    private func makeFittedFontKey(
+        text: String,
+        maxSize: CGFloat,
+        minSize: CGFloat,
+        width: CGFloat,
+        weight: NSFont.Weight
+    ) -> FittedFontKey {
+        FittedFontKey(
+            text: text,
+            maxSizeTenths: quantizedTenths(maxSize),
+            minSizeTenths: quantizedTenths(minSize),
+            widthTenths: quantizedTenths(width),
+            weightTenths: quantizedTenths(weight.rawValue)
+        )
+    }
+
+    private func quantizedTenths(_ value: CGFloat) -> Int {
+        Int((value * 10).rounded())
+    }
+
+    private func trimCache<Key, Value>(_ cache: inout [Key: Value], limit: Int) {
+        guard cache.count > limit else {
+            return
+        }
+
+        let removeCount = max(1, limit / 4)
+        let keysToRemove = Array(cache.keys.prefix(removeCount))
+        for key in keysToRemove {
+            cache.removeValue(forKey: key)
+        }
+    }
+
+    private func layoutMetrics() -> LayoutMetrics {
+        if let cachedLayoutMetrics {
+            return cachedLayoutMetrics
+        }
+
+        let statsCardHeight: CGFloat
+        let channelCount = max(1, snapshot.cacheRates.count)
+        if channelCount == 1 {
+            statsCardHeight = 86
+        } else {
+            statsCardHeight = min(168, max(96, 64 + CGFloat(channelCount) * 14))
+        }
+
+        let statsSectionHeight = statsHeaderHeight + statsCardHeight + 16
+        let codexSectionHeight = snapshot.codexModelIQ?.items.isEmpty == false ? CGFloat(136) : 0
+        let panelListTopOffset = panelContentInset
+            + statsSectionHeight
+            + (codexSectionHeight > 0 ? codexSectionTopGap + codexSectionHeight : 0)
+            + sectionDividerTopGap
+            + sectionHeaderHeight
+            + sectionHeaderBottomGap
+
+        let cardStackHeight: CGFloat
+        if snapshot.subscriptions.isEmpty {
+            cardStackHeight = 68
+        } else {
+            cardStackHeight = snapshot.subscriptions.map(subscriptionCardHeight).reduce(0, +)
+                + CGFloat(max(0, snapshot.subscriptions.count - 1)) * panelCardGap
+        }
+        let preferredPanelHeight = max(212, panelListTopOffset + cardStackHeight + panelBottomPadding)
+
+        let preferredSubscriptionContentWidth: CGFloat
+        if snapshot.subscriptions.isEmpty {
+            preferredSubscriptionContentWidth = panelMinWidth
+        } else {
+            let nameFont = NSFont.systemFont(ofSize: 15, weight: .medium)
+            let periodFont = NSFont.monospacedDigitSystemFont(ofSize: 11.4, weight: .regular)
+            let maxRowWidth = snapshot.subscriptions.reduce(CGFloat(0)) { width, item in
+                let periodText = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
+                let nameWidth = measuredWidth(item.name, font: nameFont)
+                let periodWidth = measuredWidth(periodText, font: periodFont)
+                return max(width, nameWidth + 14 + periodWidth)
+            }
+            preferredSubscriptionContentWidth = maxRowWidth + panelContentInset * 2 + 32
+        }
+
+        let titleFont = sectionTitleFont()
+        let rangeFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+        let metricTitleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let metricValueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .semibold)
+        let rangeWidth = statsRangeButtonsWidth(font: rangeFont)
+        let refreshFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let refreshWidth = measuredWidth("刷新时间：00:00:00", font: refreshFont) + 6
+        let headerWidth = measuredWidth("使用统计", font: titleFont) + 14 + refreshWidth + 12 + rangeWidth
+
+        let metricValues = [
+            ("花费", Formatters.usd(snapshot.todayCost)),
+            ("请求数", Formatters.integer(snapshot.requestCount)),
+            ("Tokens", Formatters.compactInteger(snapshot.totalTokens))
+        ]
+        let metricCardWidth = metricValues.reduce(CGFloat(238)) { width, item in
+            let titleWidth = min(48, max(34, measuredWidth(item.0, font: metricTitleFont)) + 2)
+            let valueWidth = measuredWidth(item.1, font: metricValueFont) + 4
+            return max(width, 10 + 18 + 6 + titleWidth + 8 + 44 + 8 + max(56, valueWidth) + 10)
+        }
+        let cacheCardWidth = max(
+            CGFloat(120),
+            measuredWidth("缓存率", font: metricTitleFont) + 46,
+            measuredWidth("100%", font: .monospacedDigitSystemFont(ofSize: 9, weight: .semibold)) + 72
+        )
+        let walletCardWidth = max(
+            CGFloat(120),
+            measuredWidth("钱包余额", font: .systemFont(ofSize: 11, weight: .medium)) + 46,
+            measuredWidth(Formatters.usd(snapshot.walletBalance), font: .monospacedDigitSystemFont(ofSize: 16.2, weight: .semibold)) + 20
+        )
+        let cardsWidth = max(
+            metricCardWidth * 2,
+            cacheCardWidth * 4,
+            walletCardWidth * 4
+        ) + 8 * 2
+        let preferredStatsContentWidth = max(headerWidth, cardsWidth) + panelContentInset * 2
+
+        let preferredCodexModelIQContentWidth: CGFloat
+        if let items = snapshot.codexModelIQ?.items, items.isEmpty == false {
+            let visibleItems = Array(items.prefix(5))
+            let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
+            let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
+            let cardWidth = visibleItems.reduce(CGFloat(96)) { width, item in
+                max(
+                    width,
+                    measuredWidth(item.name, font: nameFont) + 30,
+                    measuredWidth(String(format: "%.1f", item.score), font: scoreFont) + 18
+                )
+            }
+            let contentWidth = cardWidth * CGFloat(visibleItems.count)
+                + CGFloat(max(0, visibleItems.count - 1)) * 8
+            let titleWidth = measuredWidth("Codex 模型智商", font: titleFont)
+                + 16
+                + measuredWidth("00-00 00:00", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold))
+            preferredCodexModelIQContentWidth = max(contentWidth, titleWidth) + panelContentInset * 2
+        } else {
+            preferredCodexModelIQContentWidth = panelMinWidth
+        }
+
+        let metrics = LayoutMetrics(
+            preferredPanelHeight: preferredPanelHeight,
+            statsCardHeight: statsCardHeight,
+            statsSectionHeight: statsSectionHeight,
+            codexSectionHeight: codexSectionHeight,
+            panelListTopOffset: panelListTopOffset,
+            preferredSubscriptionContentWidth: preferredSubscriptionContentWidth,
+            preferredStatsContentWidth: preferredStatsContentWidth,
+            preferredCodexModelIQContentWidth: preferredCodexModelIQContentWidth,
+            preferredPanelWidth: max(
+                panelMinWidth,
+                preferredSubscriptionContentWidth,
+                preferredStatsContentWidth,
+                preferredCodexModelIQContentWidth
+            )
+        )
+        cachedLayoutMetrics = metrics
+        return metrics
     }
 
     private func shouldRedrawSnapshotChange(from oldSnapshot: UsageSnapshot, to newSnapshot: UsageSnapshot) -> Bool {
@@ -1834,14 +2071,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func preferredPanelHeight() -> CGFloat {
-        let cardStackHeight: CGFloat
-        if snapshot.subscriptions.isEmpty {
-            cardStackHeight = 68
-        } else {
-            cardStackHeight = snapshot.subscriptions.map(subscriptionCardHeight).reduce(0, +)
-                + CGFloat(max(0, snapshot.subscriptions.count - 1)) * panelCardGap
-        }
-        return max(212, panelListTopOffset() + cardStackHeight + panelBottomPadding)
+        layoutMetrics().preferredPanelHeight
     }
 
     private func subscriptionCardHeight(_ item: SubscriptionDisplayItem) -> CGFloat {
@@ -1853,40 +2083,23 @@ final class UsageWidgetView: NSView {
     }
 
     private func panelListTopOffset() -> CGFloat {
-        panelContentInset
-            + statsSectionHeight()
-            + (snapshot.codexModelIQ?.items.isEmpty == false ? codexSectionTopGap + codexModelIQSectionHeight() : 0)
-            + sectionDividerTopGap
-            + sectionHeaderHeight
-            + sectionHeaderBottomGap
+        layoutMetrics().panelListTopOffset
     }
 
     private func statsSectionHeight() -> CGFloat {
-        statsHeaderHeight + statsCardHeight() + 16
+        layoutMetrics().statsSectionHeight
     }
 
     private func codexModelIQSectionHeight() -> CGFloat {
-        guard snapshot.codexModelIQ?.items.isEmpty == false else {
-            return 0
-        }
-        return 136
+        layoutMetrics().codexSectionHeight
     }
 
     private func statsCardHeight() -> CGFloat {
-        let channelCount = max(1, snapshot.cacheRates.count)
-        if channelCount == 1 {
-            return 86
-        }
-        return min(168, max(96, 64 + CGFloat(channelCount) * 14))
+        layoutMetrics().statsCardHeight
     }
 
     private func preferredPanelWidth(maxWidth: CGFloat? = nil) -> CGFloat {
-        let calculatedWidth = max(
-            panelMinWidth,
-            preferredSubscriptionContentWidth(),
-            preferredStatsContentWidth(),
-            preferredCodexModelIQContentWidth()
-        )
+        let calculatedWidth = layoutMetrics().preferredPanelWidth
         let availableWidth = maxWidth.map { max(panelCompactMinWidth, $0) } ?? panelMaxWidth
         return min(calculatedWidth, min(panelMaxWidth, availableWidth))
     }
@@ -1899,83 +2112,15 @@ final class UsageWidgetView: NSView {
     }
 
     private func preferredSubscriptionContentWidth() -> CGFloat {
-        guard snapshot.subscriptions.isEmpty == false else {
-            return panelMinWidth
-        }
-
-        let nameFont = NSFont.systemFont(ofSize: 15, weight: .medium)
-        let periodFont = NSFont.monospacedDigitSystemFont(ofSize: 11.4, weight: .regular)
-        let maxRowWidth = snapshot.subscriptions.reduce(CGFloat(0)) { width, item in
-            let periodText = "\(Formatters.dateTime(item.start)) ~ \(Formatters.dateTime(item.expiry))"
-            let nameWidth = measuredWidth(item.name, font: nameFont)
-            let periodWidth = measuredWidth(periodText, font: periodFont)
-            return max(width, nameWidth + 14 + periodWidth)
-        }
-
-        return maxRowWidth + panelContentInset * 2 + 32
+        layoutMetrics().preferredSubscriptionContentWidth
     }
 
     private func preferredStatsContentWidth() -> CGFloat {
-        let titleFont = sectionTitleFont()
-        let rangeFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
-        let metricTitleFont = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let metricValueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .semibold)
-        let rangeWidth = statsRangeButtonsWidth(font: rangeFont)
-        let refreshFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        let refreshWidth = measuredWidth("刷新时间：00:00:00", font: refreshFont) + 6
-        let headerWidth = measuredWidth("使用统计", font: titleFont) + 14 + refreshWidth + 12 + rangeWidth
-
-        let metricValues = [
-            ("花费", Formatters.usd(snapshot.todayCost)),
-            ("请求数", Formatters.integer(snapshot.requestCount)),
-            ("Tokens", Formatters.compactInteger(snapshot.totalTokens))
-        ]
-        let metricCardWidth = metricValues.reduce(CGFloat(238)) { width, item in
-            let titleWidth = min(48, max(34, measuredWidth(item.0, font: metricTitleFont)) + 2)
-            let valueWidth = measuredWidth(item.1, font: metricValueFont) + 4
-            return max(width, 10 + 18 + 6 + titleWidth + 8 + 44 + 8 + max(56, valueWidth) + 10)
-        }
-        let cacheCardWidth = max(
-            CGFloat(120),
-            measuredWidth("缓存率", font: metricTitleFont) + 46,
-            measuredWidth("100%", font: .monospacedDigitSystemFont(ofSize: 9, weight: .semibold)) + 72
-        )
-        let walletCardWidth = max(
-            CGFloat(120),
-            measuredWidth("钱包余额", font: .systemFont(ofSize: 11, weight: .medium)) + 46,
-            measuredWidth(Formatters.usd(snapshot.walletBalance), font: .monospacedDigitSystemFont(ofSize: 16.2, weight: .semibold)) + 20
-        )
-        let cardsWidth = max(
-            metricCardWidth * 2,
-            cacheCardWidth * 4,
-            walletCardWidth * 4
-        ) + 8 * 2
-        return max(headerWidth, cardsWidth) + panelContentInset * 2
+        layoutMetrics().preferredStatsContentWidth
     }
 
     private func preferredCodexModelIQContentWidth() -> CGFloat {
-        guard let items = snapshot.codexModelIQ?.items,
-              items.isEmpty == false
-        else {
-            return panelMinWidth
-        }
-
-        let visibleItems = Array(items.prefix(5))
-        let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
-        let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
-        let cardWidth = visibleItems.reduce(CGFloat(96)) { width, item in
-            max(
-                width,
-                measuredWidth(item.name, font: nameFont) + 30,
-                measuredWidth(String(format: "%.1f", item.score), font: scoreFont) + 18
-            )
-        }
-        let contentWidth = cardWidth * CGFloat(visibleItems.count)
-            + CGFloat(max(0, visibleItems.count - 1)) * 8
-        let titleWidth = measuredWidth("Codex 模型智商", font: sectionTitleFont())
-            + 16
-            + measuredWidth("00-00 00:00", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold))
-        return max(contentWidth, titleWidth) + panelContentInset * 2
+        layoutMetrics().preferredCodexModelIQContentWidth
     }
 
     private func statsRangeButtonWidths(font: NSFont = .systemFont(ofSize: 10.5, weight: .semibold)) -> [CGFloat] {
@@ -2005,16 +2150,32 @@ final class UsageWidgetView: NSView {
         width: CGFloat,
         weight: NSFont.Weight = .bold
     ) -> NSFont {
+        let cacheKey = makeFittedFontKey(
+            text: text,
+            maxSize: maxSize,
+            minSize: minSize,
+            width: width,
+            weight: weight
+        )
+        if let cached = fittedMonospacedFontCache[cacheKey] {
+            return cached
+        }
+
         var size = maxSize
         while size > minSize {
             let font = NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
-            let measured = (text as NSString).size(withAttributes: [.font: font]).width
+            let measured = measuredWidth(text, font: font)
             if measured <= width {
+                fittedMonospacedFontCache[cacheKey] = font
+                trimCache(&fittedMonospacedFontCache, limit: LayoutCacheLimits.fittedFontEntries)
                 return font
             }
             size -= 0.5
         }
-        return .monospacedDigitSystemFont(ofSize: minSize, weight: weight)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: minSize, weight: weight)
+        fittedMonospacedFontCache[cacheKey] = font
+        trimCache(&fittedMonospacedFontCache, limit: LayoutCacheLimits.fittedFontEntries)
+        return font
     }
 
     private func fittedSystemFont(
@@ -2024,20 +2185,43 @@ final class UsageWidgetView: NSView {
         width: CGFloat,
         weight: NSFont.Weight = .regular
     ) -> NSFont {
+        let cacheKey = makeFittedFontKey(
+            text: text,
+            maxSize: maxSize,
+            minSize: minSize,
+            width: width,
+            weight: weight
+        )
+        if let cached = fittedSystemFontCache[cacheKey] {
+            return cached
+        }
+
         var size = maxSize
         while size > minSize {
             let font = NSFont.systemFont(ofSize: size, weight: weight)
-            let measured = (text as NSString).size(withAttributes: [.font: font]).width
+            let measured = measuredWidth(text, font: font)
             if measured <= width {
+                fittedSystemFontCache[cacheKey] = font
+                trimCache(&fittedSystemFontCache, limit: LayoutCacheLimits.fittedFontEntries)
                 return font
             }
             size -= 0.4
         }
-        return .systemFont(ofSize: minSize, weight: weight)
+        let font = NSFont.systemFont(ofSize: minSize, weight: weight)
+        fittedSystemFontCache[cacheKey] = font
+        trimCache(&fittedSystemFontCache, limit: LayoutCacheLimits.fittedFontEntries)
+        return font
     }
 
     private func measuredWidth(_ text: String, font: NSFont) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: font]).width
+        let key = makeMeasuredWidthKey(text: text, font: font)
+        if let cached = measuredWidthCache[key] {
+            return cached
+        }
+        let value = (text as NSString).size(withAttributes: [.font: font]).width
+        measuredWidthCache[key] = value
+        trimCache(&measuredWidthCache, limit: LayoutCacheLimits.measuredWidthEntries)
+        return value
     }
 
     private func pixelAligned(_ rect: NSRect) -> NSRect {
@@ -2062,13 +2246,10 @@ final class UsageWidgetView: NSView {
         kern: CGFloat = 0,
         shadow: NSColor? = nil
     ) {
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        style.lineBreakMode = .byTruncatingTail
         var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,
-            .paragraphStyle: style,
+            .paragraphStyle: Self.centerParagraphStyle,
             .kern: kern
         ]
 
@@ -2091,14 +2272,20 @@ final class UsageWidgetView: NSView {
         kern: CGFloat = 0,
         alignment: NSTextAlignment = .left
     ) {
-        let style = NSMutableParagraphStyle()
-        style.alignment = alignment
-        style.lineBreakMode = .byTruncatingTail
+        let paragraphStyle: NSParagraphStyle
+        switch alignment {
+        case .center:
+            paragraphStyle = Self.centerParagraphStyle
+        case .right:
+            paragraphStyle = Self.rightParagraphStyle
+        default:
+            paragraphStyle = Self.leftParagraphStyle
+        }
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color,
             .kern: kern,
-            .paragraphStyle: style
+            .paragraphStyle: paragraphStyle
         ]
         (text as NSString).draw(in: rect, withAttributes: attributes)
     }
