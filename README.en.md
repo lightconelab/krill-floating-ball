@@ -47,7 +47,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 - Native Swift/AppKit implementation with no Dock icon and a persistent macOS menu bar item.
 - Always-on-top draggable 80px liquid floating ball.
 - Edge progress bar enabled by default: the widget snaps near screen edges, supports multi-display setups, and can be disabled from the menu bar.
-- Hover panel showing usage statistics, wallet balance, refresh status, and all active subscriptions.
+- Hover panel showing usage statistics, wallet balance, refresh status, and all active subscriptions, with two subscription cards per page and compact header pagination.
 - Usage statistics ranges: `Monthly Window`, `Monthly Plan`, `Today`, `7 Days`, and `30 Days`.
 - Spend, requests, and Tokens include sparklines; cache rate is shown per channel.
 - The expanded panel can show a horizontal Codex model IQ ranking sorted from high to low.
@@ -59,7 +59,7 @@ When the widget is near a screen edge, it can snap into a progress bar. Left and
 ## What It Shows
 
 - The expanded panel shows usage statistics, Codex model IQ, cache rate, wallet balance, refresh status, and active subscriptions.
-- Active subscription cards show plan name, time range, quota progress, and remaining time.
+- Active subscription cards show plan name, time range, quota progress, and remaining time; more than two subscriptions are paginated in service-provided order.
 - The floating ball and edge progress bar provide a quick visual status indicator; the expanded panel remains the detailed view.
 - Wallet balance is shown separately from subscription cards.
 - Values in screenshots are UI examples only and do not document fixed quota rules or real account data.

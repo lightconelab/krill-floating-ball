@@ -17,6 +17,11 @@ final class UsageWidgetView: NSView {
         case vertical
     }
 
+    private enum SubscriptionPageAction {
+        case previous
+        case next
+    }
+
     private struct MeasuredWidthKey: Hashable {
         let text: String
         let fontName: String
@@ -74,6 +79,7 @@ final class UsageWidgetView: NSView {
     var dragUpdatedAction: ((NSRect) -> NSRect)?
     var dragEndedAction: (() -> Void)?
     var statsRangeChanged: ((StatsRange) -> Void)?
+    var preferredPanelSizeChanged: (() -> Void)?
 
     var ballPresentation: BallPresentation = .sphere {
         didSet {
@@ -97,7 +103,11 @@ final class UsageWidgetView: NSView {
 
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
-            guard shouldRedrawSnapshotChange(from: oldValue, to: snapshot) else {
+            let pageChanged = subscriptionPagination.clamp(itemCount: snapshot.subscriptions.count)
+            if snapshot.subscriptions.count <= SubscriptionPagination.pageSize {
+                subscriptionPageButtonRects.removeAll(keepingCapacity: true)
+            }
+            guard pageChanged || shouldRedrawSnapshotChange(from: oldValue, to: snapshot) else {
                 return
             }
             invalidateLayoutMetrics()
@@ -147,6 +157,8 @@ final class UsageWidgetView: NSView {
     private var tracking: NSTrackingArea?
     private var pendingCollapse: DispatchWorkItem?
     private var statsRangeButtonRects: [(range: StatsRange, rect: NSRect)] = []
+    private var subscriptionPageButtonRects: [(action: SubscriptionPageAction, rect: NSRect)] = []
+    private var subscriptionPagination = SubscriptionPagination()
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
@@ -281,6 +293,24 @@ final class UsageWidgetView: NSView {
 
     private func handlePanelMouseDown(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        for item in subscriptionPageButtonRects.reversed() where item.rect.contains(point) {
+            let itemCount = snapshot.subscriptions.count
+            let didMove: Bool
+            switch item.action {
+            case .previous:
+                didMove = subscriptionPagination.movePrevious(itemCount: itemCount)
+            case .next:
+                didMove = subscriptionPagination.moveNext(itemCount: itemCount)
+            }
+            guard didMove else {
+                return
+            }
+            invalidateLayoutMetrics()
+            needsDisplay = true
+            preferredPanelSizeChanged?()
+            return
+        }
+
         for item in statsRangeButtonRects.reversed() {
             guard item.rect.contains(point),
                   snapshot.availableStatsRanges.contains(item.range)
@@ -412,11 +442,12 @@ final class UsageWidgetView: NSView {
             + sectionHeaderBottomGap
 
         let cardStackHeight: CGFloat
-        if snapshot.subscriptions.isEmpty {
+        let visibleSubscriptions = currentSubscriptionItems()
+        if visibleSubscriptions.isEmpty {
             cardStackHeight = 68
         } else {
-            cardStackHeight = snapshot.subscriptions.map(subscriptionCardHeight).reduce(0, +)
-                + CGFloat(max(0, snapshot.subscriptions.count - 1)) * panelCardGap
+            cardStackHeight = visibleSubscriptions.map(subscriptionCardHeight).reduce(0, +)
+                + CGFloat(max(0, visibleSubscriptions.count - 1)) * panelCardGap
         }
         let preferredPanelHeight = max(212, panelListTopOffset + cardStackHeight + panelBottomPadding)
 
@@ -1723,6 +1754,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func drawSubscriptionCards(in rect: NSRect, alpha: CGFloat) {
+        subscriptionPageButtonRects.removeAll(keepingCapacity: true)
         let listTop = rect.minY + panelListTopOffset()
         let titleY = listTop - sectionHeaderHeight - sectionHeaderBottomGap
         drawText(
@@ -1731,6 +1763,7 @@ final class UsageWidgetView: NSView {
             font: sectionTitleFont(),
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
+        drawSubscriptionPagination(in: rect, titleY: titleY, alpha: alpha)
 
         let listRect = NSRect(
             x: rect.minX + panelContentInset,
@@ -1738,7 +1771,7 @@ final class UsageWidgetView: NSView {
             width: rect.width - panelContentInset * 2,
             height: rect.maxY - listTop - panelBottomPadding
         )
-        let items = snapshot.subscriptions
+        let items = currentSubscriptionItems()
         guard items.isEmpty == false else {
             drawCentered(
                 snapshot.needsToken ? "请先在菜单栏设置 Krill 账号" : "暂无生效套餐",
@@ -1755,6 +1788,77 @@ final class UsageWidgetView: NSView {
             drawSubscriptionCard(item, in: NSRect(x: listRect.minX, y: y, width: listRect.width, height: cardHeight), alpha: alpha)
             y += cardHeight + panelCardGap
         }
+    }
+
+    private func drawSubscriptionPagination(in rect: NSRect, titleY: CGFloat, alpha: CGFloat) {
+        let itemCount = snapshot.subscriptions.count
+        let pageCount = subscriptionPagination.pageCount(for: itemCount)
+        guard pageCount > 1 else {
+            return
+        }
+
+        let buttonSize: CGFloat = 22
+        let pageWidth: CGFloat = 34
+        let gap: CGFloat = 4
+        let totalWidth = buttonSize * 2 + pageWidth + gap * 2
+        let startX = rect.maxX - panelContentInset - totalWidth
+        let buttonY = titleY - 3
+        let previousRect = NSRect(x: startX, y: buttonY, width: buttonSize, height: buttonSize)
+        let pageRect = NSRect(x: previousRect.maxX + gap, y: buttonY, width: pageWidth, height: buttonSize)
+        let nextRect = NSRect(x: pageRect.maxX + gap, y: buttonY, width: buttonSize, height: buttonSize)
+
+        drawSubscriptionPageButton(
+            "‹",
+            rect: previousRect,
+            enabled: subscriptionPagination.canMovePrevious(itemCount: itemCount),
+            alpha: alpha
+        )
+        drawText(
+            "\(subscriptionPagination.pageIndex + 1)/\(pageCount)",
+            rect: NSRect(x: pageRect.minX, y: pageRect.minY + 5, width: pageRect.width, height: 12),
+            font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold),
+            color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
+            alignment: .center
+        )
+        drawSubscriptionPageButton(
+            "›",
+            rect: nextRect,
+            enabled: subscriptionPagination.canMoveNext(itemCount: itemCount),
+            alpha: alpha
+        )
+
+        subscriptionPageButtonRects.append((.previous, previousRect))
+        subscriptionPageButtonRects.append((.next, nextRect))
+    }
+
+    private func drawSubscriptionPageButton(
+        _ title: String,
+        rect: NSRect,
+        enabled: Bool,
+        alpha: CGFloat
+    ) {
+        let background = enabled
+            ? NSColor.white.withAlphaComponent(0.90 * alpha)
+            : NSColor(hex: 0xE8EEF5, alpha: 0.55 * alpha)
+        let border = enabled
+            ? NSColor(hex: 0xD8E0EA, alpha: alpha)
+            : NSColor(hex: 0xD8E0EA, alpha: 0.45 * alpha)
+        let foreground = enabled
+            ? NSColor(hex: 0x475569).withAlphaComponent(alpha)
+            : NSColor(hex: 0xA3AFBD).withAlphaComponent(0.72 * alpha)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        background.setFill()
+        path.fill()
+        border.setStroke()
+        path.lineWidth = 0.7
+        path.stroke()
+        drawText(
+            title,
+            rect: NSRect(x: rect.minX, y: rect.minY + 2, width: rect.width, height: 17),
+            font: .systemFont(ofSize: 15, weight: .semibold),
+            color: foreground,
+            alignment: .center
+        )
     }
 
     private func drawSubscriptionCard(_ item: SubscriptionDisplayItem, in rect: NSRect, alpha: CGFloat) {
@@ -2072,6 +2176,10 @@ final class UsageWidgetView: NSView {
 
     private func preferredPanelHeight() -> CGFloat {
         layoutMetrics().preferredPanelHeight
+    }
+
+    private func currentSubscriptionItems() -> ArraySlice<SubscriptionDisplayItem> {
+        snapshot.subscriptions[subscriptionPagination.visibleRange(for: snapshot.subscriptions.count)]
     }
 
     private func subscriptionCardHeight(_ item: SubscriptionDisplayItem) -> CGFloat {

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.2.11 - 2026-07-13
+
+- Added pagination to active subscriptions, showing two cards per page with compact previous/next controls and a page indicator in the section header.
+- Made the expanded panel adapt to the current subscription page height while keeping the panel top edge stable during page transitions.
+- Kept the current subscription page when refreshed data still supports it, clamped invalid pages after subscription changes, and reset to the first page when the panel is reopened.
+- Improved Codex model IQ refresh reliability and reduced repeated parsing or cache bypass during automatic and statistic-range refreshes.
+- Reduced memory-sensitive rendering overhead by caching repeated text measurements, fitted fonts, and panel layout calculations with bounded cache sizes.
+- Refreshed the public expanded-panel, floating-ball overview, and edge-progress overview screenshots for the paginated subscription UI.
+
 ## v0.2.10 - 2026-07-02
 
 - Added the Codex model IQ ranking module to the expanded panel, with horizontally sorted native cards and lightweight cached fetching.

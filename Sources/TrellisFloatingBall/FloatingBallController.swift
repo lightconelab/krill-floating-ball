@@ -365,11 +365,19 @@ final class FloatingBallController {
         malloc_zone_pressure_relief(nil, 0)
     }
 
-    private func positionPanel(animated: Bool) {
+    private func positionPanel(animated: Bool, preserveTopEdge: Bool = false) {
         guard let panelWindow, panelWindow.isVisible, let panelView else {
             return
         }
-        let frame = targetPanelFrame()
+        var frame = targetPanelFrame()
+        if preserveTopEdge, framesAreEqual(panelWindow.frame, frame) == false {
+            frame.origin.y = panelWindow.frame.maxY - frame.height
+            if let visible = panelWindow.screen?.visibleFrame ?? window.screen?.visibleFrame {
+                frame.origin.y = min(frame.origin.y, visible.maxY - frame.height - 12)
+                frame.origin.y = max(frame.origin.y, visible.minY + 12)
+                frame = pixelAligned(frame, on: panelWindow.screen ?? window.screen)
+            }
+        }
         let panelContentFrame = NSRect(origin: .zero, size: frame.size)
         if framesAreEqual(panelView.frame, panelContentFrame) == false {
             panelView.frame = panelContentFrame
@@ -378,7 +386,11 @@ final class FloatingBallController {
             return
         }
         if animated {
-            panelWindow.animator().setFrame(frame, display: true)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panelWindow.animator().setFrame(frame, display: true)
+            }
         } else {
             panelWindow.setFrame(frame, display: true)
         }
@@ -455,6 +467,9 @@ final class FloatingBallController {
         }
         view.statsRangeChanged = { [weak store] range in
             store?.setStatsRange(range)
+        }
+        view.preferredPanelSizeChanged = { [weak self] in
+            self?.positionPanel(animated: true, preserveTopEdge: true)
         }
         panelView = view
         return view
