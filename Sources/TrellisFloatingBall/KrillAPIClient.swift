@@ -665,32 +665,110 @@ enum CodexModelIQHTMLParser {
     }
 
     private static func extractItems(from html: String) throws -> [CodexModelIQItem] {
+        let modelColors = extractModelColors(from: html)
         let section = firstCapture(
             in: html,
             pattern: #"(<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?</section>)"#
         ) ?? html
-        let pattern = #"<div[^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*>[\s\S]*?<span[^>]*>([^<]+)</span>[\s\S]*?<strong[^>]*>([^<]+)</strong>[\s\S]*?</div>"#
+        let summary = firstCapture(
+            in: section,
+            pattern: #"(<div[^>]*class="[^"]*\bmodel-iq-score-summary\b[^"]*"[^>]*>[\s\S]*?</article>)"#
+        ) ?? section
+        let pattern = #"<div([^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*)>[\s\S]*?<span[^>]*>([^<]+)</span>[\s\S]*?<strong[^>]*>([^<]+)</strong>[\s\S]*?</div>"#
         let regex = try NSRegularExpression(
             pattern: pattern,
             options: [.caseInsensitive, .dotMatchesLineSeparators]
         )
-        let range = NSRange(section.startIndex..<section.endIndex, in: section)
-        return regex.matches(in: section, range: range).compactMap { match in
-            guard match.numberOfRanges >= 3,
-                  let nameRange = Range(match.range(at: 1), in: section),
-                  let scoreRange = Range(match.range(at: 2), in: section)
+        let range = NSRange(summary.startIndex..<summary.endIndex, in: summary)
+        return regex.matches(in: summary, range: range).compactMap { match in
+            guard match.numberOfRanges >= 4,
+                  let attributesRange = Range(match.range(at: 1), in: summary),
+                  let nameRange = Range(match.range(at: 2), in: summary),
+                  let scoreRange = Range(match.range(at: 3), in: summary)
             else {
                 return nil
             }
-            let name = normalizedText(String(section[nameRange]))
-            let scoreText = normalizedText(String(section[scoreRange]))
+            let attributes = String(summary[attributesRange])
+            let name = normalizedText(String(summary[nameRange]))
+            let scoreText = normalizedText(String(summary[scoreRange]))
             guard name.isEmpty == false,
                   let score = Double(scoreText)
             else {
                 return nil
             }
-            return CodexModelIQItem(name: name, score: score)
+            let modelKey = firstCapture(
+                in: attributes,
+                pattern: #"\bdata-model-key\s*=\s*"([^"]+)""#
+            )
+            let colorHex = modelKey.flatMap { modelColors[CodexModelIQPalette.normalizedKey($0)] }
+                ?? CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
+            return CodexModelIQItem(name: name, score: score, colorHex: colorHex)
         }
+    }
+
+    private static func extractModelColors(from html: String) -> [String: Int] {
+        guard let styleRegex = try? NSRegularExpression(
+            pattern: #"<style[^>]*>([\s\S]*?)</style>"#,
+            options: [.caseInsensitive]
+        ),
+        let ruleRegex = try? NSRegularExpression(
+            pattern: #"([^{}]+)\{([^{}]*)\}"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ),
+        let keyRegex = try? NSRegularExpression(
+            pattern: #"\.model-iq-score-chip-([A-Za-z0-9_]+)"#,
+            options: [.caseInsensitive]
+        ),
+        let colorRegex = try? NSRegularExpression(
+            pattern: #"(?:^|;)\s*color\s*:\s*#([0-9A-Fa-f]{6})\b"#,
+            options: [.caseInsensitive]
+        ) else {
+            return [:]
+        }
+
+        let htmlRange = NSRange(html.startIndex..<html.endIndex, in: html)
+        var colors: [String: Int] = [:]
+        for styleMatch in styleRegex.matches(in: html, range: htmlRange) {
+            guard styleMatch.numberOfRanges >= 2,
+                  let styleRange = Range(styleMatch.range(at: 1), in: html)
+            else {
+                continue
+            }
+            let stylesheet = String(html[styleRange])
+            let stylesheetRange = NSRange(stylesheet.startIndex..<stylesheet.endIndex, in: stylesheet)
+            for rule in ruleRegex.matches(in: stylesheet, range: stylesheetRange) {
+                guard rule.numberOfRanges >= 3,
+                      let selectorSourceRange = Range(rule.range(at: 1), in: stylesheet),
+                      let bodySourceRange = Range(rule.range(at: 2), in: stylesheet)
+                else {
+                    continue
+                }
+                let selectors = String(stylesheet[selectorSourceRange])
+                guard selectors.range(of: ".model-iq-score-chip-", options: .caseInsensitive) != nil else {
+                    continue
+                }
+                let body = String(stylesheet[bodySourceRange])
+                let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
+                guard let colorMatch = colorRegex.firstMatch(in: body, range: bodyRange),
+                      colorMatch.numberOfRanges >= 2,
+                      let colorRange = Range(colorMatch.range(at: 1), in: body),
+                      let colorHex = Int(body[colorRange], radix: 16)
+                else {
+                    continue
+                }
+
+                let selectorRange = NSRange(selectors.startIndex..<selectors.endIndex, in: selectors)
+                for keyMatch in keyRegex.matches(in: selectors, range: selectorRange) {
+                    guard keyMatch.numberOfRanges >= 2,
+                          let keyRange = Range(keyMatch.range(at: 1), in: selectors)
+                    else {
+                        continue
+                    }
+                    colors[CodexModelIQPalette.normalizedKey(String(selectors[keyRange]))] = colorHex
+                }
+            }
+        }
+        return colors
     }
 
     private static func normalizedUpdateText(_ text: String) -> String {
@@ -752,16 +830,24 @@ enum CodexModelIQSummaryJSONParser {
 
         var items: [CodexModelIQItem] = []
         if let latest = modelIQ.latest {
-            items.append(CodexModelIQItem(name: normalizedModelName(label: nil, latest: latest), score: latest.score))
+            let name = normalizedModelName(label: nil, latest: latest)
+            let modelKey = CodexModelIQPalette.normalizedKey("\(latest.model)-\(latest.reasoningEffort)")
+            items.append(CodexModelIQItem(
+                name: name,
+                score: latest.score,
+                colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
+            ))
         }
         if let comparisons = modelIQ.comparisons {
-            items.append(contentsOf: comparisons.values.compactMap { comparison in
+            items.append(contentsOf: comparisons.compactMap { modelKey, comparison in
                 guard let latest = comparison.latest else {
                     return nil
                 }
+                let name = normalizedModelName(label: comparison.label, latest: latest)
                 return CodexModelIQItem(
-                    name: normalizedModelName(label: comparison.label, latest: latest),
-                    score: latest.score
+                    name: name,
+                    score: latest.score,
+                    colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
                 )
             })
         }

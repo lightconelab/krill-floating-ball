@@ -17,7 +17,7 @@ final class UsageWidgetView: NSView {
         case vertical
     }
 
-    private enum SubscriptionPageAction {
+    private enum PageAction {
         case previous
         case next
     }
@@ -103,9 +103,14 @@ final class UsageWidgetView: NSView {
 
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
-            let pageChanged = subscriptionPagination.clamp(itemCount: snapshot.subscriptions.count)
-            if snapshot.subscriptions.count <= SubscriptionPagination.pageSize {
+            let subscriptionPageChanged = subscriptionPagination.clamp(itemCount: snapshot.subscriptions.count)
+            let codexPageChanged = codexModelIQPagination.clamp(itemCount: codexModelIQItemCount)
+            let pageChanged = subscriptionPageChanged || codexPageChanged
+            if snapshot.subscriptions.count <= subscriptionPagination.pageSize {
                 subscriptionPageButtonRects.removeAll(keepingCapacity: true)
+            }
+            if codexModelIQItemCount <= codexModelIQPagination.pageSize {
+                codexModelIQPageButtonRects.removeAll(keepingCapacity: true)
             }
             guard pageChanged || shouldRedrawSnapshotChange(from: oldValue, to: snapshot) else {
                 return
@@ -120,6 +125,13 @@ final class UsageWidgetView: NSView {
         didSet {
             guard oldValue != isExpanded else {
                 return
+            }
+            if isExpanded, displayMode == .panel {
+                let subscriptionPageChanged = subscriptionPagination.reset()
+                let codexPageChanged = codexModelIQPagination.reset()
+                if subscriptionPageChanged || codexPageChanged {
+                    invalidateLayoutMetrics()
+                }
             }
             panelProgress = isExpanded ? max(panelProgress, 0.2) : panelProgress
             needsDisplay = true
@@ -148,6 +160,9 @@ final class UsageWidgetView: NSView {
     private let sectionDividerTopGap: CGFloat = 18
     private let sectionHeaderHeight: CGFloat = 16
     private let sectionHeaderBottomGap: CGFloat = 12
+    private let paginationButtonSize: CGFloat = 22
+    private let paginationPageWidth: CGFloat = 34
+    private let paginationGap: CGFloat = 4
 
     private var animationPhase: CGFloat = 0
     private var panelProgress: CGFloat = 0
@@ -157,8 +172,10 @@ final class UsageWidgetView: NSView {
     private var tracking: NSTrackingArea?
     private var pendingCollapse: DispatchWorkItem?
     private var statsRangeButtonRects: [(range: StatsRange, rect: NSRect)] = []
-    private var subscriptionPageButtonRects: [(action: SubscriptionPageAction, rect: NSRect)] = []
-    private var subscriptionPagination = SubscriptionPagination()
+    private var subscriptionPageButtonRects: [(action: PageAction, rect: NSRect)] = []
+    private var codexModelIQPageButtonRects: [(action: PageAction, rect: NSRect)] = []
+    private var subscriptionPagination = Pagination(pageSize: 2)
+    private var codexModelIQPagination = Pagination(pageSize: 5)
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
@@ -293,15 +310,25 @@ final class UsageWidgetView: NSView {
 
     private func handlePanelMouseDown(_ event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        for item in subscriptionPageButtonRects.reversed() where item.rect.contains(point) {
-            let itemCount = snapshot.subscriptions.count
-            let didMove: Bool
-            switch item.action {
-            case .previous:
-                didMove = subscriptionPagination.movePrevious(itemCount: itemCount)
-            case .next:
-                didMove = subscriptionPagination.moveNext(itemCount: itemCount)
+        for item in codexModelIQPageButtonRects.reversed() where item.rect.contains(point) {
+            let didMove = Self.movePage(
+                action: item.action,
+                pagination: &codexModelIQPagination,
+                itemCount: codexModelIQItemCount
+            )
+            guard didMove else {
+                return
             }
+            needsDisplay = true
+            return
+        }
+
+        for item in subscriptionPageButtonRects.reversed() where item.rect.contains(point) {
+            let didMove = Self.movePage(
+                action: item.action,
+                pagination: &subscriptionPagination,
+                itemCount: snapshot.subscriptions.count
+            )
             guard didMove else {
                 return
             }
@@ -319,6 +346,15 @@ final class UsageWidgetView: NSView {
             }
             statsRangeChanged?(item.range)
             return
+        }
+    }
+
+    private static func movePage(action: PageAction, pagination: inout Pagination, itemCount: Int) -> Bool {
+        switch action {
+        case .previous:
+            return pagination.movePrevious(itemCount: itemCount)
+        case .next:
+            return pagination.moveNext(itemCount: itemCount)
         }
     }
 
@@ -504,21 +540,25 @@ final class UsageWidgetView: NSView {
 
         let preferredCodexModelIQContentWidth: CGFloat
         if let items = snapshot.codexModelIQ?.items, items.isEmpty == false {
-            let visibleItems = Array(items.prefix(5))
+            let visibleItemCount = min(codexModelIQPagination.pageSize, items.count)
             let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
             let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
-            let cardWidth = visibleItems.reduce(CGFloat(96)) { width, item in
+            let cardWidth = items.reduce(CGFloat(96)) { width, item in
                 max(
                     width,
                     measuredWidth(item.name, font: nameFont) + 30,
                     measuredWidth(String(format: "%.1f", item.score), font: scoreFont) + 18
                 )
             }
-            let contentWidth = cardWidth * CGFloat(visibleItems.count)
-                + CGFloat(max(0, visibleItems.count - 1)) * 8
+            let contentWidth = cardWidth * CGFloat(visibleItemCount)
+                + CGFloat(max(0, visibleItemCount - 1)) * 8
+            let paginationWidth = codexModelIQPagination.pageCount(for: items.count) > 1
+                ? 10 + paginationControlWidth
+                : 0
             let titleWidth = measuredWidth("Codex 模型智商", font: titleFont)
                 + 16
                 + measuredWidth("00-00 00:00", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold))
+                + paginationWidth
             preferredCodexModelIQContentWidth = max(contentWidth, titleWidth) + panelContentInset * 2
         } else {
             preferredCodexModelIQContentWidth = panelMinWidth
@@ -1517,6 +1557,7 @@ final class UsageWidgetView: NSView {
     }
 
     private func drawCodexModelIQSection(in rect: NSRect, alpha: CGFloat) {
+        codexModelIQPageButtonRects.removeAll(keepingCapacity: true)
         guard let codexModelIQ = snapshot.codexModelIQ,
               codexModelIQ.items.isEmpty == false
         else {
@@ -1536,24 +1577,42 @@ final class UsageWidgetView: NSView {
             font: titleFont,
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha)
         )
+        let pageCount = codexModelIQPagination.pageCount(for: codexModelIQ.items.count)
+        let paginationStartX = content.maxX - (pageCount > 1 ? paginationControlWidth : 0)
+        let dateMaxX = pageCount > 1 ? paginationStartX - 10 : content.maxX
         drawText(
             codexModelIQ.updatedAtText,
-            rect: NSRect(x: content.maxX - 120, y: content.minY + 1, width: 120, height: 16),
+            rect: NSRect(x: dateMaxX - 120, y: content.minY + 1, width: 120, height: 16),
             font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
             color: NSColor(hex: 0x94A3B8).withAlphaComponent(alpha),
             alignment: .right
         )
+        if pageCount > 1 {
+            let controls = drawPagination(
+                codexModelIQPagination,
+                itemCount: codexModelIQ.items.count,
+                startX: paginationStartX,
+                buttonY: content.minY - 3,
+                alpha: alpha
+            )
+            codexModelIQPageButtonRects.append((.previous, controls.previous))
+            codexModelIQPageButtonRects.append((.next, controls.next))
+        }
 
-        let items = Array(codexModelIQ.items.prefix(5))
+        let visibleRange = codexModelIQPagination.visibleRange(for: codexModelIQ.items.count)
+        let items = codexModelIQ.items[visibleRange]
         let gap: CGFloat = 8
         let cardY = content.minY + 34
-        let cardWidth = max(70, (content.width - gap * CGFloat(max(0, items.count - 1))) / CGFloat(max(1, items.count)))
+        let columnCount = min(codexModelIQPagination.pageSize, codexModelIQ.items.count)
+        let cardWidth = max(
+            70,
+            (content.width - gap * CGFloat(max(0, columnCount - 1))) / CGFloat(max(1, columnCount))
+        )
 
-        for (index, item) in items.enumerated() {
-            let x = content.minX + CGFloat(index) * (cardWidth + gap)
+        for (localIndex, item) in items.enumerated() {
+            let x = content.minX + CGFloat(localIndex) * (cardWidth + gap)
             drawCodexModelIQCard(
                 item,
-                index: index,
                 rect: NSRect(x: x, y: cardY, width: cardWidth, height: codexModelIQCardHeight),
                 alpha: alpha
             )
@@ -1570,14 +1629,14 @@ final class UsageWidgetView: NSView {
 
     private func drawCodexModelIQCard(
         _ item: CodexModelIQItem,
-        index: Int,
         rect: NSRect,
         alpha: CGFloat
     ) {
+        let palette = CodexModelIQPalette.style(colorHex: item.colorHex)
         drawStatCardShell(in: rect, alpha: alpha)
 
-        let tint = codexModelIQColor(index: index).withAlphaComponent(alpha)
-        let labelBackground = codexModelIQLabelBackground(index: index).withAlphaComponent(alpha)
+        let tint = palette.tint.withAlphaComponent(alpha)
+        let labelBackground = palette.labelBackground.withAlphaComponent(alpha)
         let labelRect = NSRect(x: rect.minX + 10, y: rect.minY + 9, width: rect.width - 20, height: 22)
         let labelPath = NSBezierPath(roundedRect: labelRect, xRadius: 8, yRadius: 8)
         labelBackground.setFill()
@@ -1622,28 +1681,6 @@ final class UsageWidgetView: NSView {
             .shadow: shadow
         ]
         (scoreText as NSString).draw(in: scoreRect, withAttributes: attributes)
-    }
-
-    private func codexModelIQColor(index: Int) -> NSColor {
-        let palette = [
-            NSColor(hex: 0xEF233C),
-            NSColor(hex: 0x2563EB),
-            NSColor(hex: 0x16A34A),
-            NSColor(hex: 0x00A7C7),
-            NSColor(hex: 0xFACC15)
-        ]
-        return palette[index % palette.count]
-    }
-
-    private func codexModelIQLabelBackground(index: Int) -> NSColor {
-        let palette = [
-            NSColor(hex: 0xFFE7EC),
-            NSColor(hex: 0xE6EEFF),
-            NSColor(hex: 0xE8F8EE),
-            NSColor(hex: 0xDFFAFF),
-            NSColor(hex: 0xFFF8D6)
-        ]
-        return palette[index % palette.count]
     }
 
     private func cacheRateColor(index: Int) -> NSColor {
@@ -1797,41 +1834,67 @@ final class UsageWidgetView: NSView {
             return
         }
 
-        let buttonSize: CGFloat = 22
-        let pageWidth: CGFloat = 34
-        let gap: CGFloat = 4
-        let totalWidth = buttonSize * 2 + pageWidth + gap * 2
-        let startX = rect.maxX - panelContentInset - totalWidth
-        let buttonY = titleY - 3
-        let previousRect = NSRect(x: startX, y: buttonY, width: buttonSize, height: buttonSize)
-        let pageRect = NSRect(x: previousRect.maxX + gap, y: buttonY, width: pageWidth, height: buttonSize)
-        let nextRect = NSRect(x: pageRect.maxX + gap, y: buttonY, width: buttonSize, height: buttonSize)
+        let controls = drawPagination(
+            subscriptionPagination,
+            itemCount: itemCount,
+            startX: rect.maxX - panelContentInset - paginationControlWidth,
+            buttonY: titleY - 3,
+            alpha: alpha
+        )
+        subscriptionPageButtonRects.append((.previous, controls.previous))
+        subscriptionPageButtonRects.append((.next, controls.next))
+    }
 
-        drawSubscriptionPageButton(
+    private var paginationControlWidth: CGFloat {
+        paginationButtonSize * 2 + paginationPageWidth + paginationGap * 2
+    }
+
+    private func drawPagination(
+        _ pagination: Pagination,
+        itemCount: Int,
+        startX: CGFloat,
+        buttonY: CGFloat,
+        alpha: CGFloat
+    ) -> (previous: NSRect, next: NSRect) {
+        let pageCount = pagination.pageCount(for: itemCount)
+        let previousRect = NSRect(x: startX, y: buttonY, width: paginationButtonSize, height: paginationButtonSize)
+        let pageRect = NSRect(
+            x: previousRect.maxX + paginationGap,
+            y: buttonY,
+            width: paginationPageWidth,
+            height: paginationButtonSize
+        )
+        let nextRect = NSRect(
+            x: pageRect.maxX + paginationGap,
+            y: buttonY,
+            width: paginationButtonSize,
+            height: paginationButtonSize
+        )
+
+        drawPageButton(
             "‹",
             rect: previousRect,
-            enabled: subscriptionPagination.canMovePrevious(itemCount: itemCount),
+            enabled: pagination.canMovePrevious(itemCount: itemCount),
             alpha: alpha
         )
         drawText(
-            "\(subscriptionPagination.pageIndex + 1)/\(pageCount)",
+            "\(pagination.pageIndex + 1)/\(pageCount)",
             rect: NSRect(x: pageRect.minX, y: pageRect.minY + 5, width: pageRect.width, height: 12),
             font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold),
             color: NSColor(hex: 0x64748B).withAlphaComponent(alpha),
             alignment: .center
         )
-        drawSubscriptionPageButton(
+        drawPageButton(
             "›",
             rect: nextRect,
-            enabled: subscriptionPagination.canMoveNext(itemCount: itemCount),
+            enabled: pagination.canMoveNext(itemCount: itemCount),
             alpha: alpha
         )
 
-        subscriptionPageButtonRects.append((.previous, previousRect))
-        subscriptionPageButtonRects.append((.next, nextRect))
+        return (previousRect, nextRect)
     }
 
-    private func drawSubscriptionPageButton(
+    private func drawPageButton(
         _ title: String,
         rect: NSRect,
         enabled: Bool,
@@ -2180,6 +2243,10 @@ final class UsageWidgetView: NSView {
 
     private func currentSubscriptionItems() -> ArraySlice<SubscriptionDisplayItem> {
         snapshot.subscriptions[subscriptionPagination.visibleRange(for: snapshot.subscriptions.count)]
+    }
+
+    private var codexModelIQItemCount: Int {
+        snapshot.codexModelIQ?.items.count ?? 0
     }
 
     private func subscriptionCardHeight(_ item: SubscriptionDisplayItem) -> CGFloat {

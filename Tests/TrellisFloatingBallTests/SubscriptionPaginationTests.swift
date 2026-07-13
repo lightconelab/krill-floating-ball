@@ -3,9 +3,9 @@ import XCTest
 @testable import TrellisFloatingBall
 
 @MainActor
-final class SubscriptionPaginationTests: XCTestCase {
+final class PaginationTests: XCTestCase {
     func testPageCountUsesTwoItemsPerPage() {
-        let pagination = SubscriptionPagination()
+        let pagination = Pagination(pageSize: 2)
 
         XCTAssertEqual(pagination.pageCount(for: 0), 1)
         XCTAssertEqual(pagination.pageCount(for: 1), 1)
@@ -15,7 +15,7 @@ final class SubscriptionPaginationTests: XCTestCase {
     }
 
     func testNavigationExposesExpectedVisibleRanges() {
-        var pagination = SubscriptionPagination()
+        var pagination = Pagination(pageSize: 2)
 
         XCTAssertEqual(pagination.visibleRange(for: 5), 0..<2)
         XCTAssertFalse(pagination.canMovePrevious(itemCount: 5))
@@ -29,7 +29,7 @@ final class SubscriptionPaginationTests: XCTestCase {
     }
 
     func testClampReturnsToLastValidPageWhenItemsShrink() {
-        var pagination = SubscriptionPagination()
+        var pagination = Pagination(pageSize: 2)
         XCTAssertTrue(pagination.moveNext(itemCount: 5))
         XCTAssertTrue(pagination.moveNext(itemCount: 5))
         XCTAssertEqual(pagination.pageIndex, 2)
@@ -41,6 +41,18 @@ final class SubscriptionPaginationTests: XCTestCase {
         XCTAssertTrue(pagination.clamp(itemCount: 0))
         XCTAssertEqual(pagination.pageIndex, 0)
         XCTAssertEqual(pagination.visibleRange(for: 0), 0..<0)
+    }
+
+    func testModelIQPaginationUsesFiveItemsAndCanReset() {
+        var pagination = Pagination(pageSize: 5)
+
+        XCTAssertEqual(pagination.pageCount(for: 9), 2)
+        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<5)
+        XCTAssertTrue(pagination.moveNext(itemCount: 9))
+        XCTAssertEqual(pagination.visibleRange(for: 9), 5..<9)
+        XCTAssertTrue(pagination.reset())
+        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<5)
+        XCTAssertFalse(pagination.reset())
     }
 
     func testPanelHeightOnlyIncludesFirstTwoSubscriptions() {

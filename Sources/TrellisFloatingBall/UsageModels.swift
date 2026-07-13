@@ -127,6 +127,7 @@ struct UsageTrendPoint: Equatable {
 struct CodexModelIQItem: Equatable {
     let name: String
     let score: Double
+    let colorHex: Int
 }
 
 struct CodexModelIQSnapshot: Equatable {

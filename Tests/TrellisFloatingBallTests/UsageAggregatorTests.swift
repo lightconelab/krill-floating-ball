@@ -146,9 +146,18 @@ final class UsageAggregatorTests: XCTestCase {
             "GPT-5.5-medium",
             "GPT-5.4-high",
             "GPT-5.5-xhigh",
-            "GPT-5.4-xhigh"
+            "GPT-5.4-xhigh",
+            "GPT-5.5-low"
         ])
-        XCTAssertEqual(snapshot.items.map(\.score), [100.0, 87.5, 87.5, 75.0, 37.5])
+        XCTAssertEqual(snapshot.items.map(\.score), [100.0, 87.5, 87.5, 75.0, 37.5, 25.0])
+        XCTAssertEqual(snapshot.items.map(\.colorHex), [
+            0x123456,
+            0xD97706,
+            0xDC2626,
+            0x16A34A,
+            0x7C3AED,
+            0x0891B2
+        ])
     }
 
     func testCodexModelIQSummaryJSONParserReadsLatestSnapshot() throws {
@@ -164,6 +173,14 @@ final class UsageAggregatorTests: XCTestCase {
             "GPT-5.5-low"
         ])
         XCTAssertEqual(snapshot.items.map(\.score), [105.0, 90.0, 90.0, 75.0, 75.0, 60.0])
+        XCTAssertEqual(snapshot.items.map(\.colorHex), [
+            0x16A34A,
+            0x2563EB,
+            0x7C3AED,
+            0xD97706,
+            0xDC2626,
+            0x0891B2
+        ])
     }
 
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
@@ -479,6 +496,11 @@ private let exhaustedQuotaNoWalletJSON = """
 """
 
 private let codexModelIQHTML = """
+<style>
+  .model-iq-score-chip-gpt_55_high strong { color: #111111; }
+  .model-iq-score-chip-gpt_55_medium strong { color: #d97706; }
+  .model-iq-score-chip-gpt_55_high strong { color: #123456; }
+</style>
 <section class="model-iq model-iq-red" aria-label="Codex 雷达">
   <div class="model-iq-head">
     <div>
@@ -486,7 +508,12 @@ private let codexModelIQHTML = """
     </div>
   </div>
   <article class="model-iq-score">
-    <div class="model-iq-score-pair">
+    <div class="model-iq-score-chip" data-model-key="decoy">
+      <span>不应读取的模型</span><div><strong>999.0</strong></div>
+    </div>
+    <div class="model-iq-score-summary">
+      <div class="model-iq-score-main">
+        <div class="model-iq-score-pair">
       <div class="model-iq-score-chip model-iq-score-chip-primary" data-model-key="gpt_55_xhigh">
         <span>GPT-5.5-xhigh</span>
         <div class="model-iq-score-metrics"><strong>75.0</strong><span class="model-iq-score-mini">$31.7</span></div>
@@ -506,6 +533,12 @@ private let codexModelIQHTML = """
       <div class="model-iq-score-chip model-iq-score-chip-gpt_54_high" data-model-key="gpt_54_high">
         <span>GPT-5.4-high</span>
         <div class="model-iq-score-metrics"><strong>87.5</strong><span class="model-iq-score-mini">$15.0</span></div>
+      </div>
+      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_low" data-model-key="gpt_55_low">
+        <span>GPT-5.5-low</span>
+        <div class="model-iq-score-metrics"><strong>25.0</strong><span class="model-iq-score-mini">$12.0</span></div>
+      </div>
+        </div>
       </div>
     </div>
   </article>
