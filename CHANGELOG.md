@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## v0.2.12 - 2026-07-22
+
+- Changed Codex model IQ pagination to four cards per page, keeping the expanded panel narrower while preserving fixed card widths on partial final pages.
+- Displayed the complete Codex model update time in Beijing time using the `yyyy-MM-dd HH:mm:ss` format without clipping the title row.
+- Improved model IQ freshness and resilience by combining authoritative model data with independently refreshed visual colors and retaining graceful single-path fallbacks.
+- Added support for the latest model color definitions while preserving fallback colors when a matching visual style is unavailable.
+- Released temporary parsing heap pressure after model refreshes and expanded parser, color-merging, timestamp, and pagination test coverage.
+
 ## v0.2.11 - 2026-07-13
 
 - Added pagination to active subscriptions, showing two cards per page with compact previous/next controls and a page indicator in the section header.

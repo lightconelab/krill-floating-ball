@@ -175,7 +175,7 @@ final class UsageWidgetView: NSView {
     private var subscriptionPageButtonRects: [(action: PageAction, rect: NSRect)] = []
     private var codexModelIQPageButtonRects: [(action: PageAction, rect: NSRect)] = []
     private var subscriptionPagination = Pagination(pageSize: 2)
-    private var codexModelIQPagination = Pagination(pageSize: 5)
+    private var codexModelIQPagination = Pagination(pageSize: 4)
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
@@ -539,10 +539,12 @@ final class UsageWidgetView: NSView {
         let preferredStatsContentWidth = max(headerWidth, cardsWidth) + panelContentInset * 2
 
         let preferredCodexModelIQContentWidth: CGFloat
-        if let items = snapshot.codexModelIQ?.items, items.isEmpty == false {
+        if let codexModelIQ = snapshot.codexModelIQ, codexModelIQ.items.isEmpty == false {
+            let items = codexModelIQ.items
             let visibleItemCount = min(codexModelIQPagination.pageSize, items.count)
             let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
             let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
+            let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
             let cardWidth = items.reduce(CGFloat(96)) { width, item in
                 max(
                     width,
@@ -557,7 +559,7 @@ final class UsageWidgetView: NSView {
                 : 0
             let titleWidth = measuredWidth("Codex 模型智商", font: titleFont)
                 + 16
-                + measuredWidth("00-00 00:00", font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold))
+                + measuredWidth(codexModelIQ.updatedAtText, font: dateFont)
                 + paginationWidth
             preferredCodexModelIQContentWidth = max(contentWidth, titleWidth) + panelContentInset * 2
         } else {
@@ -1580,10 +1582,12 @@ final class UsageWidgetView: NSView {
         let pageCount = codexModelIQPagination.pageCount(for: codexModelIQ.items.count)
         let paginationStartX = content.maxX - (pageCount > 1 ? paginationControlWidth : 0)
         let dateMaxX = pageCount > 1 ? paginationStartX - 10 : content.maxX
+        let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        let dateWidth = measuredWidth(codexModelIQ.updatedAtText, font: dateFont) + 2
         drawText(
             codexModelIQ.updatedAtText,
-            rect: NSRect(x: dateMaxX - 120, y: content.minY + 1, width: 120, height: 16),
-            font: .monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+            rect: NSRect(x: dateMaxX - dateWidth, y: content.minY + 1, width: dateWidth, height: 16),
+            font: dateFont,
             color: NSColor(hex: 0x94A3B8).withAlphaComponent(alpha),
             alignment: .right
         )

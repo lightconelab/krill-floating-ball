@@ -43,15 +43,17 @@ final class PaginationTests: XCTestCase {
         XCTAssertEqual(pagination.visibleRange(for: 0), 0..<0)
     }
 
-    func testModelIQPaginationUsesFiveItemsAndCanReset() {
-        var pagination = Pagination(pageSize: 5)
+    func testModelIQPaginationUsesFourItemsAndCanReset() {
+        var pagination = Pagination(pageSize: 4)
 
-        XCTAssertEqual(pagination.pageCount(for: 9), 2)
-        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<5)
+        XCTAssertEqual(pagination.pageCount(for: 9), 3)
+        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<4)
         XCTAssertTrue(pagination.moveNext(itemCount: 9))
-        XCTAssertEqual(pagination.visibleRange(for: 9), 5..<9)
+        XCTAssertEqual(pagination.visibleRange(for: 9), 4..<8)
+        XCTAssertTrue(pagination.moveNext(itemCount: 9))
+        XCTAssertEqual(pagination.visibleRange(for: 9), 8..<9)
         XCTAssertTrue(pagination.reset())
-        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<5)
+        XCTAssertEqual(pagination.visibleRange(for: 9), 0..<4)
         XCTAssertFalse(pagination.reset())
     }
 

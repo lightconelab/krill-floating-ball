@@ -143,19 +143,50 @@ final class KrillAPIClient: @unchecked Sendable {
         if forceRefresh == false, let cached = cachedCodexModelIQIfFresh() {
             return cached
         }
-
-        do {
-            let snapshot = try await fetchCodexModelIQFromHTML()
-            cacheCodexModelIQ(snapshot)
-            return snapshot
-        } catch {
-            let snapshot = try await fetchCodexModelIQFromSummary()
-            cacheCodexModelIQ(snapshot)
-            return snapshot
+        defer {
+            releaseUnusedHeapMemory()
         }
+
+        async let htmlSource = fetchCodexModelIQFromHTML()
+        async let summarySnapshot = fetchCodexModelIQFromSummary()
+
+        let htmlResult: Result<CodexModelIQHTMLSource, Error>
+        do {
+            htmlResult = .success(try await htmlSource)
+        } catch {
+            htmlResult = .failure(error)
+        }
+
+        let summaryResult: Result<CodexModelIQSnapshot, Error>
+        do {
+            summaryResult = .success(try await summarySnapshot)
+        } catch {
+            summaryResult = .failure(error)
+        }
+
+        let snapshot: CodexModelIQSnapshot
+        switch (summaryResult, htmlResult) {
+        case let (.success(summary), .success(html)):
+            snapshot = CodexModelIQSnapshotMerger.applyColors(
+                html.colorsByModelKey,
+                to: summary
+            )
+        case let (.success(summary), .failure):
+            snapshot = summary
+        case let (.failure(summaryError), .success(html)):
+            guard let fallbackSnapshot = html.snapshot else {
+                throw summaryError
+            }
+            snapshot = fallbackSnapshot
+        case let (.failure(summaryError), .failure):
+            throw summaryError
+        }
+
+        cacheCodexModelIQ(snapshot)
+        return snapshot
     }
 
-    private func fetchCodexModelIQFromHTML() async throws -> CodexModelIQSnapshot {
+    private func fetchCodexModelIQFromHTML() async throws -> CodexModelIQHTMLSource {
         var request = URLRequest(url: codexRadarHTMLURL)
         request.httpMethod = "GET"
         request.timeoutInterval = Network.codexRadarTimeout
@@ -171,7 +202,7 @@ final class KrillAPIClient: @unchecked Sendable {
             throw KrillAPIError.invalidResponse
         }
         return try autoreleasepool {
-            try CodexModelIQHTMLParser.parse(html)
+            try CodexModelIQHTMLParser.parseSource(html)
         }
     }
 
@@ -636,10 +667,38 @@ enum LocalProtocolDateFormatter {
     }
 }
 
+struct CodexModelIQHTMLSource {
+    let snapshot: CodexModelIQSnapshot?
+    let colorsByModelKey: [String: Int]
+}
+
 enum CodexModelIQHTMLParser {
     static func parse(_ html: String) throws -> CodexModelIQSnapshot {
+        try parseSnapshot(html, modelColors: extractModelColors(from: html))
+    }
+
+    static func parseSource(_ html: String) throws -> CodexModelIQHTMLSource {
+        let modelColors = extractModelColors(from: html)
+        let snapshot = try? parseSnapshot(html, modelColors: modelColors)
+        guard snapshot != nil || modelColors.isEmpty == false else {
+            throw KrillAPIError.missingData
+        }
+        return CodexModelIQHTMLSource(
+            snapshot: snapshot,
+            colorsByModelKey: modelColors
+        )
+    }
+
+    static func parseColors(_ html: String) -> [String: Int] {
+        extractModelColors(from: html)
+    }
+
+    private static func parseSnapshot(
+        _ html: String,
+        modelColors: [String: Int]
+    ) throws -> CodexModelIQSnapshot {
         let updateText = try extractUpdateText(from: html)
-        let items = try extractItems(from: html)
+        let items = try extractItems(from: html, modelColors: modelColors)
         guard items.isEmpty == false else {
             throw KrillAPIError.missingData
         }
@@ -664,8 +723,10 @@ enum CodexModelIQHTMLParser {
         return normalizedUpdateText(raw)
     }
 
-    private static func extractItems(from html: String) throws -> [CodexModelIQItem] {
-        let modelColors = extractModelColors(from: html)
+    private static func extractItems(
+        from html: String,
+        modelColors: [String: Int]
+    ) throws -> [CodexModelIQItem] {
         let section = firstCapture(
             in: html,
             pattern: #"(<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?</section>)"#
@@ -702,7 +763,12 @@ enum CodexModelIQHTMLParser {
             )
             let colorHex = modelKey.flatMap { modelColors[CodexModelIQPalette.normalizedKey($0)] }
                 ?? CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
-            return CodexModelIQItem(name: name, score: score, colorHex: colorHex)
+            return CodexModelIQItem(
+                name: name,
+                score: score,
+                colorHex: colorHex,
+                modelKey: modelKey.map(CodexModelIQPalette.normalizedKey)
+            )
         }
     }
 
@@ -720,7 +786,7 @@ enum CodexModelIQHTMLParser {
             options: [.caseInsensitive]
         ),
         let colorRegex = try? NSRegularExpression(
-            pattern: #"(?:^|;)\s*color\s*:\s*#([0-9A-Fa-f]{6})\b"#,
+            pattern: #"(?:^|;)\s*(?:--model-iq-card-color|color)\s*:\s*#([0-9A-Fa-f]{6})\b"#,
             options: [.caseInsensitive]
         ) else {
             return [:]
@@ -835,7 +901,8 @@ enum CodexModelIQSummaryJSONParser {
             items.append(CodexModelIQItem(
                 name: name,
                 score: latest.score,
-                colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
+                colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name),
+                modelKey: modelKey
             ))
         }
         if let comparisons = modelIQ.comparisons {
@@ -847,7 +914,8 @@ enum CodexModelIQSummaryJSONParser {
                 return CodexModelIQItem(
                     name: name,
                     score: latest.score,
-                    colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
+                    colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name),
+                    modelKey: CodexModelIQPalette.normalizedKey(modelKey)
                 )
             })
         }
@@ -871,7 +939,7 @@ enum CodexModelIQSummaryJSONParser {
             .map(\.element)
 
         let updatedAtText = RadarUpdateFormatter.format(
-            iso8601: envelope.quotaRadar?.updatedAt,
+            iso8601: modelIQ.updatedAt,
             fallbackDateCode: modelIQ.latest?.date
         )
         return CodexModelIQSnapshot(updatedAtText: updatedAtText, items: sortedItems)
@@ -906,13 +974,38 @@ enum CodexModelIQSummaryJSONParser {
     }
 }
 
+enum CodexModelIQSnapshotMerger {
+    static func applyColors(
+        _ colorsByModelKey: [String: Int],
+        to primary: CodexModelIQSnapshot
+    ) -> CodexModelIQSnapshot {
+        let normalizedColors = colorsByModelKey.reduce(into: [String: Int]()) { colors, entry in
+            colors[CodexModelIQPalette.normalizedKey(entry.key)] = entry.value
+        }
+
+        let mergedItems = primary.items.map { item in
+            let modelKey = item.modelKey.map(CodexModelIQPalette.normalizedKey)
+            let colorHex = modelKey.flatMap { normalizedColors[$0] }
+                ?? normalizedColors[CodexModelIQPalette.normalizedKey(item.name)]
+                ?? item.colorHex
+            return CodexModelIQItem(
+                name: item.name,
+                score: item.score,
+                colorHex: colorHex,
+                modelKey: item.modelKey
+            )
+        }
+        return CodexModelIQSnapshot(updatedAtText: primary.updatedAtText, items: mergedItems)
+    }
+}
+
 private enum RadarUpdateFormatter {
     private static let formatterLock = NSLock()
     private static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
-        formatter.dateFormat = "MM-dd HH:mm"
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
 
@@ -933,12 +1026,13 @@ private enum RadarUpdateFormatter {
         let normalized = text.replacingOccurrences(of: "_", with: "-")
         let parts = normalized.split(separator: "-")
         guard parts.count >= 3,
+              let year = Int(parts[0]),
               let month = Int(parts[1]),
               let day = Int(parts[2])
         else {
             return text
         }
-        return String(format: "%02d-%02d --:--", month, day)
+        return String(format: "%04d-%02d-%02d --:--:--", year, month, day)
     }
 
     private static func parseISO8601(_ text: String) -> Date? {
@@ -979,17 +1073,22 @@ struct SubscriptionEnvelope: Decodable {
 
 private struct CodexRadarSummaryEnvelope: Decodable {
     let modelIQ: CodexRadarModelIQSummary?
-    let quotaRadar: CodexRadarQuotaRadarSummary?
 
     enum CodingKeys: String, CodingKey {
         case modelIQ = "model_iq"
-        case quotaRadar = "quota_radar"
     }
 }
 
 private struct CodexRadarModelIQSummary: Decodable {
+    let updatedAt: String?
     let latest: CodexRadarModelSnapshot?
     let comparisons: [String: CodexRadarModelComparison]?
+
+    enum CodingKeys: String, CodingKey {
+        case updatedAt = "updated_at"
+        case latest
+        case comparisons
+    }
 }
 
 private struct CodexRadarModelComparison: Decodable {
@@ -1008,14 +1107,6 @@ private struct CodexRadarModelSnapshot: Decodable {
         case score
         case model
         case reasoningEffort = "reasoning_effort"
-    }
-}
-
-private struct CodexRadarQuotaRadarSummary: Decodable {
-    let updatedAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case updatedAt = "updated_at"
     }
 }
 

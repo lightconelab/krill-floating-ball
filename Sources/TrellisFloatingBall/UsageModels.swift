@@ -128,6 +128,14 @@ struct CodexModelIQItem: Equatable {
     let name: String
     let score: Double
     let colorHex: Int
+    let modelKey: String?
+
+    init(name: String, score: Double, colorHex: Int, modelKey: String? = nil) {
+        self.name = name
+        self.score = score
+        self.colorHex = colorHex
+        self.modelKey = modelKey
+    }
 }
 
 struct CodexModelIQSnapshot: Equatable {

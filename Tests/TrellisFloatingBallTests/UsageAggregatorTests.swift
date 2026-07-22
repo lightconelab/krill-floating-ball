@@ -163,7 +163,7 @@ final class UsageAggregatorTests: XCTestCase {
     func testCodexModelIQSummaryJSONParserReadsLatestSnapshot() throws {
         let snapshot = try CodexModelIQSummaryJSONParser.parse(Data(codexModelIQSummaryJSON.utf8))
 
-        XCTAssertEqual(snapshot.updatedAtText, "07-03 07:16")
+        XCTAssertEqual(snapshot.updatedAtText, "2026-07-03 07:16:02")
         XCTAssertEqual(snapshot.items.map(\.name), [
             "GPT-5.5-xhigh",
             "GPT-5.5-high",
@@ -181,6 +181,32 @@ final class UsageAggregatorTests: XCTestCase {
             0xDC2626,
             0x0891B2
         ])
+    }
+
+    func testCodexModelIQSnapshotMergerKeepsJSONDataAndAppliesHTMLColors() throws {
+        let htmlColors = CodexModelIQHTMLParser.parseColors(codexModelIQHTML)
+        let jsonSnapshot = try CodexModelIQSummaryJSONParser.parse(Data(codexModelIQSummaryJSON.utf8))
+
+        let merged = CodexModelIQSnapshotMerger.applyColors(htmlColors, to: jsonSnapshot)
+
+        XCTAssertEqual(merged.updatedAtText, "2026-07-03 07:16:02")
+        XCTAssertEqual(merged.items.map(\.name), jsonSnapshot.items.map(\.name))
+        XCTAssertEqual(merged.items.map(\.score), jsonSnapshot.items.map(\.score))
+        XCTAssertEqual(
+            merged.items.first { $0.name == "GPT-5.5-high" }?.colorHex,
+            0x123456
+        )
+    }
+
+    func testCodexModelIQHTMLSourceKeepsPaletteWhenCardsAreNotStaticHTML() throws {
+        let source = try CodexModelIQHTMLParser.parseSource("""
+        <style>
+          .model-iq-score-chip-gpt_56_sol_max { --model-iq-card-color: #facc15; }
+        </style>
+        """)
+
+        XCTAssertNil(source.snapshot)
+        XCTAssertEqual(source.colorsByModelKey["gpt_56_sol_max"], 0xFACC15)
     }
 
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
@@ -499,7 +525,7 @@ private let codexModelIQHTML = """
 <style>
   .model-iq-score-chip-gpt_55_high strong { color: #111111; }
   .model-iq-score-chip-gpt_55_medium strong { color: #d97706; }
-  .model-iq-score-chip-gpt_55_high strong { color: #123456; }
+  .model-iq-score-chip-gpt_55_high { --model-iq-card-color: #123456; }
 </style>
 <section class="model-iq model-iq-red" aria-label="Codex 雷达">
   <div class="model-iq-head">
@@ -548,6 +574,7 @@ private let codexModelIQHTML = """
 private let codexModelIQSummaryJSON = """
 {
   "model_iq": {
+    "updated_at": "2026-07-02T23:16:02Z",
     "latest": {
       "date": "2026-07-03-am",
       "score": 105.0,
@@ -603,7 +630,7 @@ private let codexModelIQSummaryJSON = """
     }
   },
   "quota_radar": {
-    "updated_at": "2026-07-02T23:16:02Z"
+    "updated_at": "2020-01-01T00:00:00Z"
   }
 }
 """
