@@ -36,6 +36,40 @@ final class UsageWidgetView: NSView {
         let weightTenths: Int
     }
 
+    private struct CodexTrendCacheKey: Hashable {
+        let modelKey: String
+        let minX: Int
+        let minY: Int
+        let width: Int
+        let height: Int
+    }
+
+    private struct CodexRenderedTrendPoint {
+        let timestamp: Date
+        let score: Double
+        let location: NSPoint
+    }
+
+    private struct CodexTrendGeometry {
+        let paths: [NSBezierPath]
+        let points: [CodexRenderedTrendPoint]
+    }
+
+    private struct CodexTrendHitTarget {
+        let modelKey: String
+        let colorHex: Int
+        let cardRect: NSRect
+        let points: [CodexRenderedTrendPoint]
+    }
+
+    private struct CodexTrendHover: Equatable {
+        let modelKey: String
+        let timestamp: Date
+        let score: Double
+        let location: NSPoint
+        let colorHex: Int
+    }
+
     private struct LayoutMetrics {
         let preferredPanelHeight: CGFloat
         let statsCardHeight: CGFloat
@@ -74,6 +108,15 @@ final class UsageWidgetView: NSView {
         return style.copy() as! NSParagraphStyle
     }()
 
+    private static let codexTrendTooltipDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter
+    }()
+
     var expansionChanged: ((Bool) -> Void)?
     var dragBeganAction: (() -> Void)?
     var dragUpdatedAction: ((NSRect) -> NSRect)?
@@ -103,6 +146,9 @@ final class UsageWidgetView: NSView {
 
     var snapshot: UsageSnapshot = .placeholder {
         didSet {
+            if oldValue.codexModelIQ != snapshot.codexModelIQ {
+                invalidateCodexTrendRendering()
+            }
             let subscriptionPageChanged = subscriptionPagination.clamp(itemCount: snapshot.subscriptions.count)
             let codexPageChanged = codexModelIQPagination.clamp(itemCount: codexModelIQItemCount)
             let pageChanged = subscriptionPageChanged || codexPageChanged
@@ -133,6 +179,9 @@ final class UsageWidgetView: NSView {
                     invalidateLayoutMetrics()
                 }
             }
+            if isExpanded == false, displayMode == .panel {
+                invalidateCodexTrendRendering()
+            }
             panelProgress = isExpanded ? max(panelProgress, 0.2) : panelProgress
             needsDisplay = true
             updateAnimationScheduling()
@@ -153,7 +202,7 @@ final class UsageWidgetView: NSView {
     private let panelCardGap: CGFloat = 16
     private let panelBottomPadding: CGFloat = 20
     private let statsHeaderHeight: CGFloat = 32
-    private let codexModelIQCardHeight: CGFloat = 80
+    private let codexModelIQCardHeight: CGFloat = 84
     private let panelContentInset: CGFloat = 20
     private let expandedRightPadding: CGFloat = 16
     private let codexSectionTopGap: CGFloat = 20
@@ -174,8 +223,11 @@ final class UsageWidgetView: NSView {
     private var statsRangeButtonRects: [(range: StatsRange, rect: NSRect)] = []
     private var subscriptionPageButtonRects: [(action: PageAction, rect: NSRect)] = []
     private var codexModelIQPageButtonRects: [(action: PageAction, rect: NSRect)] = []
+    private var codexTrendGeometryCache: [CodexTrendCacheKey: CodexTrendGeometry] = [:]
+    private var codexTrendHitTargets: [CodexTrendHitTarget] = []
+    private var codexTrendHover: CodexTrendHover?
     private var subscriptionPagination = Pagination(pageSize: 2)
-    private var codexModelIQPagination = Pagination(pageSize: 4)
+    private var codexModelIQPagination = Pagination(pageSize: 3)
     private var collapseGeneration = 0
     private var dragOffsetInWindow: NSPoint?
     private var pointerIsHovering = false
@@ -207,6 +259,7 @@ final class UsageWidgetView: NSView {
         pointerIsHovering = false
         cancelPendingCollapse()
         stopDisplayTimer()
+        invalidateCodexTrendRendering()
     }
 
     override func viewDidMoveToWindow() {
@@ -222,6 +275,16 @@ final class UsageWidgetView: NSView {
         needsDisplay = true
     }
 
+    override func setFrameSize(_ newSize: NSSize) {
+        let sizeChanged = frame.size != newSize
+        super.setFrameSize(newSize)
+        guard sizeChanged else {
+            return
+        }
+        invalidateLayoutMetrics()
+        invalidateCodexTrendRendering()
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking {
@@ -230,7 +293,7 @@ final class UsageWidgetView: NSView {
 
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+            options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -247,6 +310,7 @@ final class UsageWidgetView: NSView {
 
     override func mouseExited(with event: NSEvent) {
         pointerIsHovering = false
+        clearCodexTrendHover()
         updateAnimationScheduling()
         cancelPendingCollapse()
         collapseGeneration += 1
@@ -265,6 +329,13 @@ final class UsageWidgetView: NSView {
         }
         pendingCollapse = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard displayMode == .panel else {
+            return
+        }
+        updateCodexTrendHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -319,6 +390,7 @@ final class UsageWidgetView: NSView {
             guard didMove else {
                 return
             }
+            invalidateCodexTrendRendering()
             needsDisplay = true
             return
         }
@@ -356,6 +428,44 @@ final class UsageWidgetView: NSView {
         case .next:
             return pagination.moveNext(itemCount: itemCount)
         }
+    }
+
+    private func invalidateCodexTrendRendering() {
+        codexTrendGeometryCache.removeAll(keepingCapacity: false)
+        codexTrendHitTargets.removeAll(keepingCapacity: false)
+        codexTrendHover = nil
+    }
+
+    private func clearCodexTrendHover() {
+        guard codexTrendHover != nil else {
+            return
+        }
+        codexTrendHover = nil
+        needsDisplay = true
+    }
+
+    private func updateCodexTrendHover(at location: NSPoint) {
+        guard let target = codexTrendHitTargets.first(where: { $0.cardRect.contains(location) }),
+              let nearest = target.points.min(by: {
+                  abs($0.location.x - location.x) < abs($1.location.x - location.x)
+              })
+        else {
+            clearCodexTrendHover()
+            return
+        }
+
+        let hover = CodexTrendHover(
+            modelKey: target.modelKey,
+            timestamp: nearest.timestamp,
+            score: nearest.score,
+            location: nearest.location,
+            colorHex: target.colorHex
+        )
+        guard hover != codexTrendHover else {
+            return
+        }
+        codexTrendHover = hover
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -469,7 +579,7 @@ final class UsageWidgetView: NSView {
         }
 
         let statsSectionHeight = statsHeaderHeight + statsCardHeight + 16
-        let codexSectionHeight = snapshot.codexModelIQ?.items.isEmpty == false ? CGFloat(136) : 0
+        let codexSectionHeight = snapshot.codexModelIQ?.items.isEmpty == false ? CGFloat(140) : 0
         let panelListTopOffset = panelContentInset
             + statsSectionHeight
             + (codexSectionHeight > 0 ? codexSectionTopGap + codexSectionHeight : 0)
@@ -542,14 +652,15 @@ final class UsageWidgetView: NSView {
         if let codexModelIQ = snapshot.codexModelIQ, codexModelIQ.items.isEmpty == false {
             let items = codexModelIQ.items
             let visibleItemCount = min(codexModelIQPagination.pageSize, items.count)
-            let nameFont = NSFont.systemFont(ofSize: 10.4, weight: .bold)
-            let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 27, weight: .heavy)
+            let nameFont = NSFont.systemFont(ofSize: 10.2, weight: .semibold)
+            let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 15.5, weight: .heavy)
             let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-            let cardWidth = items.reduce(CGFloat(96)) { width, item in
+            let cardWidth = items.reduce(CGFloat(118)) { width, item in
                 max(
                     width,
-                    measuredWidth(item.name, font: nameFont) + 30,
-                    measuredWidth(String(format: "%.1f", item.score), font: scoreFont) + 18
+                    measuredWidth(item.name, font: nameFont)
+                        + measuredWidth(String(format: "%.1f", item.score), font: scoreFont)
+                        + 28
                 )
             }
             let contentWidth = cardWidth * CGFloat(visibleItemCount)
@@ -560,6 +671,7 @@ final class UsageWidgetView: NSView {
             let titleWidth = measuredWidth("Codex 模型智商", font: titleFont)
                 + 16
                 + measuredWidth(codexModelIQ.updatedAtText, font: dateFont)
+                + (codexModelIQ.isStale ? 50 : 0)
                 + paginationWidth
             preferredCodexModelIQContentWidth = max(contentWidth, titleWidth) + panelContentInset * 2
         } else {
@@ -1560,6 +1672,7 @@ final class UsageWidgetView: NSView {
 
     private func drawCodexModelIQSection(in rect: NSRect, alpha: CGFloat) {
         codexModelIQPageButtonRects.removeAll(keepingCapacity: true)
+        codexTrendHitTargets.removeAll(keepingCapacity: true)
         guard let codexModelIQ = snapshot.codexModelIQ,
               codexModelIQ.items.isEmpty == false
         else {
@@ -1581,7 +1694,26 @@ final class UsageWidgetView: NSView {
         )
         let pageCount = codexModelIQPagination.pageCount(for: codexModelIQ.items.count)
         let paginationStartX = content.maxX - (pageCount > 1 ? paginationControlWidth : 0)
-        let dateMaxX = pageCount > 1 ? paginationStartX - 10 : content.maxX
+        let statusMaxX = pageCount > 1 ? paginationStartX - 10 : content.maxX
+        let staleBadgeWidth: CGFloat = codexModelIQ.isStale ? 42 : 0
+        if codexModelIQ.isStale {
+            let badgeRect = NSRect(
+                x: statusMaxX - staleBadgeWidth,
+                y: content.minY - 1,
+                width: staleBadgeWidth,
+                height: 18
+            )
+            NSColor(hex: 0xFEF3C7, alpha: alpha).setFill()
+            NSBezierPath(roundedRect: badgeRect, xRadius: 7, yRadius: 7).fill()
+            drawText(
+                "未更新",
+                rect: NSRect(x: badgeRect.minX + 3, y: badgeRect.minY + 4, width: badgeRect.width - 6, height: 11),
+                font: .systemFont(ofSize: 9.2, weight: .semibold),
+                color: NSColor(hex: 0xB45309).withAlphaComponent(alpha),
+                alignment: .center
+            )
+        }
+        let dateMaxX = statusMaxX - (codexModelIQ.isStale ? staleBadgeWidth + 8 : 0)
         let dateFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         let dateWidth = measuredWidth(codexModelIQ.updatedAtText, font: dateFont) + 2
         drawText(
@@ -1618,8 +1750,15 @@ final class UsageWidgetView: NSView {
             drawCodexModelIQCard(
                 item,
                 rect: NSRect(x: x, y: cardY, width: cardWidth, height: codexModelIQCardHeight),
+                trendStart: codexModelIQ.trendStart,
+                trendEnd: codexModelIQ.trendEnd,
                 alpha: alpha
             )
+        }
+
+        if let hover = codexTrendHover,
+           codexTrendHitTargets.contains(where: { $0.modelKey == hover.modelKey }) {
+            drawCodexTrendTooltip(hover, in: content, alpha: alpha)
         }
 
         let separatorY = content.minY + codexModelIQSectionHeight() - 1
@@ -1634,57 +1773,204 @@ final class UsageWidgetView: NSView {
     private func drawCodexModelIQCard(
         _ item: CodexModelIQItem,
         rect: NSRect,
+        trendStart: Date,
+        trendEnd: Date,
         alpha: CGFloat
     ) {
         let palette = CodexModelIQPalette.style(colorHex: item.colorHex)
         drawStatCardShell(in: rect, alpha: alpha)
 
         let tint = palette.tint.withAlphaComponent(alpha)
-        let labelBackground = palette.labelBackground.withAlphaComponent(alpha)
-        let labelRect = NSRect(x: rect.minX + 10, y: rect.minY + 9, width: rect.width - 20, height: 22)
-        let labelPath = NSBezierPath(roundedRect: labelRect, xRadius: 8, yRadius: 8)
-        labelBackground.setFill()
-        labelPath.fill()
-
+        let scoreText = String(format: "%.1f", item.score)
+        let scoreFont = NSFont.monospacedDigitSystemFont(ofSize: 15.5, weight: .heavy)
+        let scoreWidth = measuredWidth(scoreText, font: scoreFont) + 2
+        let headerY = rect.minY + 9
         drawText(
             item.name,
-            rect: NSRect(x: labelRect.minX + 5, y: labelRect.minY + 5, width: labelRect.width - 10, height: 12),
+            rect: NSRect(
+                x: rect.minX + 10,
+                y: headerY + 2,
+                width: max(20, rect.width - scoreWidth - 26),
+                height: 14
+            ),
             font: fittedSystemFont(
                 text: item.name,
-                maxSize: 10.4,
-                minSize: 8.4,
-                width: labelRect.width - 10,
-                weight: .bold
+                maxSize: 10.2,
+                minSize: 8.2,
+                width: max(20, rect.width - scoreWidth - 26),
+                weight: .semibold
             ),
             color: NSColor(hex: 0x0A2540).withAlphaComponent(alpha),
-            alignment: .center
+            alignment: .left
+        )
+        drawText(
+            scoreText,
+            rect: NSRect(x: rect.maxX - scoreWidth - 10, y: headerY, width: scoreWidth, height: 18),
+            font: scoreFont,
+            color: tint,
+            alignment: .right
         )
 
-        let scoreText = String(format: "%.1f", item.score)
-        let scoreRect = NSRect(x: rect.minX + 6, y: rect.minY + 42, width: rect.width - 12, height: 32)
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.12 * alpha)
-        shadow.shadowOffset = NSSize(width: 0, height: -1)
-        shadow.shadowBlurRadius = 2
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        style.lineBreakMode = .byTruncatingTail
-        let font = fittedMonospacedFont(
-            text: scoreText,
-            maxSize: 27,
-            minSize: 20,
-            width: scoreRect.width,
-            weight: .heavy
+        let plotRect = NSRect(x: rect.minX + 10, y: rect.minY + 35, width: rect.width - 20, height: 39)
+        let geometry = codexTrendGeometry(
+            for: item,
+            rect: plotRect.insetBy(dx: 3, dy: 3),
+            trendStart: trendStart,
+            trendEnd: trendEnd
         )
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: tint,
-            .strokeColor: tint,
-            .strokeWidth: -1.8,
-            .paragraphStyle: style,
-            .shadow: shadow
-        ]
-        (scoreText as NSString).draw(in: scoreRect, withAttributes: attributes)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: plotRect).addClip()
+        tint.setStroke()
+        for path in geometry.paths {
+            path.lineWidth = 1.6
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.stroke()
+        }
+        if let latest = geometry.points.last {
+            NSColor.white.withAlphaComponent(alpha).setFill()
+            NSBezierPath(ovalIn: NSRect(
+                x: latest.location.x - 3,
+                y: latest.location.y - 3,
+                width: 6,
+                height: 6
+            )).fill()
+            tint.setFill()
+            NSBezierPath(ovalIn: NSRect(
+                x: latest.location.x - 1.8,
+                y: latest.location.y - 1.8,
+                width: 3.6,
+                height: 3.6
+            )).fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
+        codexTrendHitTargets.append(CodexTrendHitTarget(
+            modelKey: item.modelKey ?? item.name,
+            colorHex: item.colorHex,
+            cardRect: rect,
+            points: geometry.points
+        ))
+    }
+
+    private func codexTrendGeometry(
+        for item: CodexModelIQItem,
+        rect: NSRect,
+        trendStart: Date,
+        trendEnd: Date
+    ) -> CodexTrendGeometry {
+        let modelKey = item.modelKey ?? item.name
+        let key = CodexTrendCacheKey(
+            modelKey: modelKey,
+            minX: quantizedTenths(rect.minX),
+            minY: quantizedTenths(rect.minY),
+            width: quantizedTenths(rect.width),
+            height: quantizedTenths(rect.height)
+        )
+        if let cached = codexTrendGeometryCache[key] {
+            return cached
+        }
+
+        let scores = item.trend.compactMap(\.score)
+        guard scores.isEmpty == false,
+              trendEnd > trendStart,
+              rect.width > 0,
+              rect.height > 0
+        else {
+            return CodexTrendGeometry(paths: [], points: [])
+        }
+
+        let observedMin = scores.min() ?? item.score
+        let observedMax = scores.max() ?? item.score
+        let scoreSpan = max(10, observedMax - observedMin)
+        let scoreCenter = (observedMin + observedMax) / 2
+        let scoreMin = scoreCenter - scoreSpan / 2
+        let timeSpan = trendEnd.timeIntervalSince(trendStart)
+        var paths: [NSBezierPath] = []
+        var points: [CodexRenderedTrendPoint] = []
+        var currentPath: NSBezierPath?
+
+        for sample in item.trend {
+            guard let score = sample.score, score.isFinite else {
+                if let currentPath {
+                    paths.append(currentPath)
+                }
+                currentPath = nil
+                continue
+            }
+
+            let timeRatio = max(0, min(1, sample.timestamp.timeIntervalSince(trendStart) / timeSpan))
+            let scoreRatio = max(0, min(1, (score - scoreMin) / scoreSpan))
+            let location = NSPoint(
+                x: rect.minX + rect.width * timeRatio,
+                y: rect.maxY - rect.height * scoreRatio
+            )
+            points.append(CodexRenderedTrendPoint(
+                timestamp: sample.timestamp,
+                score: score,
+                location: location
+            ))
+            if let currentPath {
+                currentPath.line(to: location)
+            } else {
+                let path = NSBezierPath()
+                path.move(to: location)
+                currentPath = path
+            }
+        }
+        if let currentPath {
+            paths.append(currentPath)
+        }
+
+        let geometry = CodexTrendGeometry(paths: paths, points: points)
+        if codexTrendGeometryCache.count >= codexModelIQPagination.pageSize {
+            codexTrendGeometryCache.removeAll(keepingCapacity: true)
+        }
+        codexTrendGeometryCache[key] = geometry
+        return geometry
+    }
+
+    private func drawCodexTrendTooltip(
+        _ hover: CodexTrendHover,
+        in content: NSRect,
+        alpha: CGFloat
+    ) {
+        let tint = NSColor(hex: hover.colorHex)
+        NSColor.white.withAlphaComponent(alpha).setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: hover.location.x - 3.4,
+            y: hover.location.y - 3.4,
+            width: 6.8,
+            height: 6.8
+        )).fill()
+        tint.withAlphaComponent(alpha).setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: hover.location.x - 2,
+            y: hover.location.y - 2,
+            width: 4,
+            height: 4
+        )).fill()
+
+        let text = "\(Self.codexTrendTooltipDateFormatter.string(from: hover.timestamp)) · IQ \(String(format: "%.1f", hover.score))"
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9.4, weight: .semibold)
+        let tooltipWidth = measuredWidth(text, font: font) + 18
+        let tooltipHeight: CGFloat = 24
+        var tooltipX = hover.location.x + 8
+        if tooltipX + tooltipWidth > content.maxX {
+            tooltipX = hover.location.x - tooltipWidth - 8
+        }
+        tooltipX = max(content.minX, min(content.maxX - tooltipWidth, tooltipX))
+        let tooltipY = max(content.minY + 21, min(content.maxY - tooltipHeight, hover.location.y - tooltipHeight - 7))
+        let tooltipRect = NSRect(x: tooltipX, y: tooltipY, width: tooltipWidth, height: tooltipHeight)
+        NSColor(hex: 0x0F172A, alpha: 0.94 * alpha).setFill()
+        NSBezierPath(roundedRect: tooltipRect, xRadius: 7, yRadius: 7).fill()
+        drawText(
+            text,
+            rect: NSRect(x: tooltipRect.minX + 8, y: tooltipRect.minY + 6, width: tooltipRect.width - 16, height: 12),
+            font: font,
+            color: NSColor.white.withAlphaComponent(alpha),
+            alignment: .center
+        )
     }
 
     private func cacheRateColor(index: Int) -> NSColor {

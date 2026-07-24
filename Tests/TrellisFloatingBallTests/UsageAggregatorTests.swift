@@ -137,76 +137,62 @@ final class UsageAggregatorTests: XCTestCase {
         XCTAssertEqual(payload.channelCacheRates?.first?.cacheRate ?? 0, 0.8123, accuracy: 0.000_001)
     }
 
-    func testCodexModelIQHTMLParserReadsAndSortsScoreCards() throws {
-        let snapshot = try CodexModelIQHTMLParser.parse(codexModelIQHTML)
+    func testCodexModelIQTrendParserReadsAllModelsAndSortsLatestScores() throws {
+        let snapshot = try CodexModelIQTrendJSONParser.parse(Data(codexModelIQTrendJSON.utf8))
 
-        XCTAssertEqual(snapshot.updatedAtText, "07-02 07:45")
-        XCTAssertEqual(snapshot.items.map(\.name), [
-            "GPT-5.5-high",
-            "GPT-5.5-medium",
-            "GPT-5.4-high",
-            "GPT-5.5-xhigh",
-            "GPT-5.4-xhigh",
-            "GPT-5.5-low"
-        ])
-        XCTAssertEqual(snapshot.items.map(\.score), [100.0, 87.5, 87.5, 75.0, 37.5, 25.0])
-        XCTAssertEqual(snapshot.items.map(\.colorHex), [
-            0x123456,
-            0xD97706,
-            0xDC2626,
-            0x16A34A,
-            0x7C3AED,
-            0x0891B2
-        ])
-    }
-
-    func testCodexModelIQSummaryJSONParserReadsLatestSnapshot() throws {
-        let snapshot = try CodexModelIQSummaryJSONParser.parse(Data(codexModelIQSummaryJSON.utf8))
-
-        XCTAssertEqual(snapshot.updatedAtText, "2026-07-03 07:16:02")
-        XCTAssertEqual(snapshot.items.map(\.name), [
-            "GPT-5.5-xhigh",
-            "GPT-5.5-high",
-            "GPT-5.4-xhigh",
-            "GPT-5.5-medium",
-            "GPT-5.4-high",
-            "GPT-5.5-low"
-        ])
-        XCTAssertEqual(snapshot.items.map(\.score), [105.0, 90.0, 90.0, 75.0, 75.0, 60.0])
-        XCTAssertEqual(snapshot.items.map(\.colorHex), [
-            0x16A34A,
-            0x2563EB,
-            0x7C3AED,
-            0xD97706,
-            0xDC2626,
-            0x0891B2
-        ])
-    }
-
-    func testCodexModelIQSnapshotMergerKeepsJSONDataAndAppliesHTMLColors() throws {
-        let htmlColors = CodexModelIQHTMLParser.parseColors(codexModelIQHTML)
-        let jsonSnapshot = try CodexModelIQSummaryJSONParser.parse(Data(codexModelIQSummaryJSON.utf8))
-
-        let merged = CodexModelIQSnapshotMerger.applyColors(htmlColors, to: jsonSnapshot)
-
-        XCTAssertEqual(merged.updatedAtText, "2026-07-03 07:16:02")
-        XCTAssertEqual(merged.items.map(\.name), jsonSnapshot.items.map(\.name))
-        XCTAssertEqual(merged.items.map(\.score), jsonSnapshot.items.map(\.score))
+        XCTAssertEqual(snapshot.updatedAtText, "2026-07-23 10:00:00")
+        XCTAssertEqual(snapshot.items.count, 19)
+        XCTAssertEqual(snapshot.items.first?.name, "GPT-5.6-Sol-ultra")
+        XCTAssertEqual(snapshot.items.first?.score, 108)
+        XCTAssertEqual(snapshot.items.last?.name, "GPT-5.6-Luna-low")
+        XCTAssertEqual(snapshot.items.last?.score, 4)
         XCTAssertEqual(
-            merged.items.first { $0.name == "GPT-5.5-high" }?.colorHex,
-            0x123456
+            snapshot.items.filter { $0.score == 100 }.map(\.modelKey),
+            ["gpt_56_sol_max", "gpt_56_terra_ultra"]
         )
+        XCTAssertFalse(snapshot.isStale)
     }
 
-    func testCodexModelIQHTMLSourceKeepsPaletteWhenCardsAreNotStaticHTML() throws {
-        let source = try CodexModelIQHTMLParser.parseSource("""
-        <style>
-          .model-iq-score-chip-gpt_56_sol_max { --model-iq-card-color: #facc15; }
-        </style>
-        """)
+    func testCodexModelIQTrendParserKeepsRaw48HourPointsAndMissingGaps() throws {
+        let snapshot = try CodexModelIQTrendJSONParser.parse(Data(codexModelIQTrendJSON.utf8))
+        let formatter = ISO8601DateFormatter()
+        let sol = try XCTUnwrap(snapshot.items.first { $0.modelKey == "gpt_56_sol_ultra" })
+        let terra = try XCTUnwrap(snapshot.items.first { $0.modelKey == "gpt_56_terra_ultra" })
 
-        XCTAssertNil(source.snapshot)
-        XCTAssertEqual(source.colorsByModelKey["gpt_56_sol_max"], 0xFACC15)
+        XCTAssertEqual(snapshot.trendStart, formatter.date(from: "2026-07-21T02:00:00Z"))
+        XCTAssertEqual(snapshot.trendEnd, formatter.date(from: "2026-07-23T02:00:00Z"))
+        XCTAssertEqual(sol.trend.count, 4)
+        XCTAssertEqual(sol.trend.compactMap(\.score), [100, 106, 107, 108])
+        XCTAssertEqual(terra.trend.count, 4)
+        XCTAssertEqual(terra.trend.map(\.score), [80, nil, 99, 100])
+        XCTAssertEqual(sol.trend.map(\.timestamp), sol.trend.map(\.timestamp).sorted())
+    }
+
+    func testCodexModelIQUpdateFailureKeepsLastSuccessfulSnapshot() throws {
+        let snapshot = try CodexModelIQTrendJSONParser.parse(Data(codexModelIQTrendJSON.utf8))
+        let subscription = try decodeSubscription(sampleSubscriptionJSON)
+        let stats = try JSONDecoder().decode(StatsEnvelope.self, from: Data(statsJSON.utf8))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-06-27T12:00:00Z"))
+        let context = try UsageAggregator.statsRangeContext(subscription: subscription, requested: .today, now: now)
+        var previous = UsageSnapshot.placeholder
+        previous.codexModelIQ = snapshot
+        previous.needsToken = false
+        let stale = try UsageAggregator.makeSnapshot(
+            bundle: APIBundle(
+                subscription: subscription,
+                stats: stats,
+                statsRangeContext: context,
+                codexModelIQ: nil,
+                codexModelIQDidFail: true
+            ),
+            previous: previous,
+            now: now
+        ).codexModelIQ
+
+        XCTAssertEqual(stale?.items, snapshot.items)
+        XCTAssertEqual(stale?.updatedAtText, snapshot.updatedAtText)
+        XCTAssertTrue(stale?.isStale == true)
+        XCTAssertEqual(stale?.markingUpdateFailed(), stale)
     }
 
     func testBalanceModeTakesOverWhenQuotaPoolIsExhausted() throws {
@@ -521,116 +507,57 @@ private let exhaustedQuotaNoWalletJSON = """
 }
 """
 
-private let codexModelIQHTML = """
-<style>
-  .model-iq-score-chip-gpt_55_high strong { color: #111111; }
-  .model-iq-score-chip-gpt_55_medium strong { color: #d97706; }
-  .model-iq-score-chip-gpt_55_high { --model-iq-card-color: #123456; }
-</style>
-<section class="model-iq model-iq-red" aria-label="Codex 雷达">
-  <div class="model-iq-head">
-    <div>
-      <h2>降智雷达 <span>7月2日07:45更新</span><span class="model-iq-actions"></span></h2>
-    </div>
-  </div>
-  <article class="model-iq-score">
-    <div class="model-iq-score-chip" data-model-key="decoy">
-      <span>不应读取的模型</span><div><strong>999.0</strong></div>
-    </div>
-    <div class="model-iq-score-summary">
-      <div class="model-iq-score-main">
-        <div class="model-iq-score-pair">
-      <div class="model-iq-score-chip model-iq-score-chip-primary" data-model-key="gpt_55_xhigh">
-        <span>GPT-5.5-xhigh</span>
-        <div class="model-iq-score-metrics"><strong>75.0</strong><span class="model-iq-score-mini">$31.7</span></div>
-      </div>
-      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_high" data-model-key="gpt_55_high">
-        <span>GPT-5.5-high</span>
-        <div class="model-iq-score-metrics"><strong>100.0</strong><span class="model-iq-score-mini">$22.9</span></div>
-      </div>
-      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_medium" data-model-key="gpt_55_medium">
-        <span>GPT-5.5-medium</span>
-        <div class="model-iq-score-metrics"><strong>87.5</strong><span class="model-iq-score-mini">$19.5</span></div>
-      </div>
-      <div class="model-iq-score-chip model-iq-score-chip-gpt_54_xhigh" data-model-key="gpt_54_xhigh">
-        <span>GPT-5.4-xhigh</span>
-        <div class="model-iq-score-metrics"><strong>37.5</strong><span class="model-iq-score-mini">$18.4</span></div>
-      </div>
-      <div class="model-iq-score-chip model-iq-score-chip-gpt_54_high" data-model-key="gpt_54_high">
-        <span>GPT-5.4-high</span>
-        <div class="model-iq-score-metrics"><strong>87.5</strong><span class="model-iq-score-mini">$15.0</span></div>
-      </div>
-      <div class="model-iq-score-chip model-iq-score-chip-gpt_55_low" data-model-key="gpt_55_low">
-        <span>GPT-5.5-low</span>
-        <div class="model-iq-score-metrics"><strong>25.0</strong><span class="model-iq-score-mini">$12.0</span></div>
-      </div>
-        </div>
-      </div>
-    </div>
-  </article>
-</section>
-"""
-
-private let codexModelIQSummaryJSON = """
+private let codexModelIQTrendJSON = """
 {
-  "model_iq": {
-    "updated_at": "2026-07-02T23:16:02Z",
-    "latest": {
-      "date": "2026-07-03-am",
-      "score": 105.0,
-      "model": "gpt-5.5",
-      "reasoning_effort": "xhigh"
+  "source_updated_at": "2026-07-23T10:00:00+08:00",
+  "points": [
+    {"model":"gpt-5.6-sol","effort":"low","iq":74},
+    {"model":"gpt-5.6-sol","effort":"medium","iq":90},
+    {"model":"gpt-5.6-sol","effort":"high","iq":93},
+    {"model":"gpt-5.6-sol","effort":"xhigh","iq":94},
+    {"model":"gpt-5.6-sol","effort":"max","iq":100},
+    {"model":"gpt-5.6-sol","effort":"ultra","iq":108},
+    {"model":"gpt-5.6-terra","effort":"low","iq":38},
+    {"model":"gpt-5.6-terra","effort":"medium","iq":56},
+    {"model":"gpt-5.6-terra","effort":"high","iq":66},
+    {"model":"gpt-5.6-terra","effort":"xhigh","iq":87},
+    {"model":"gpt-5.6-terra","effort":"max","iq":98},
+    {"model":"gpt-5.6-terra","effort":"ultra","iq":100},
+    {"model":"gpt-5.6-luna","effort":"low","iq":4},
+    {"model":"gpt-5.6-luna","effort":"medium","iq":35},
+    {"model":"gpt-5.6-luna","effort":"high","iq":70},
+    {"model":"gpt-5.6-luna","effort":"xhigh","iq":83},
+    {"model":"gpt-5.6-luna","effort":"max","iq":92},
+    {"model":"gpt-5.5","effort":"high","iq":86},
+    {"model":"gpt-5.5","effort":"xhigh","iq":96}
+  ],
+  "history": [
+    {
+      "at": "2026-07-21T09:59:00+08:00",
+      "points": [{"model":"gpt-5.6-sol","effort":"ultra","iq":1}]
     },
-    "comparisons": {
-      "gpt_55_high": {
-        "label": "GPT-5.5 high",
-        "latest": {
-          "date": "2026-07-03-am",
-          "score": 90.0,
-          "model": "gpt-5.5",
-          "reasoning_effort": "high"
-        }
-      },
-      "gpt_55_medium": {
-        "label": "GPT-5.5 medium",
-        "latest": {
-          "date": "2026-07-03-am",
-          "score": 75.0,
-          "model": "gpt-5.5",
-          "reasoning_effort": "medium"
-        }
-      },
-      "gpt_55_low": {
-        "label": "GPT-5.5 low",
-        "latest": {
-          "date": "2026-07-03-am",
-          "score": 60.0,
-          "model": "gpt-5.5",
-          "reasoning_effort": "low"
-        }
-      },
-      "gpt_54_xhigh": {
-        "label": "GPT-5.4 xhigh",
-        "latest": {
-          "date": "2026-07-03-am",
-          "score": 90.0,
-          "model": "gpt-5.4",
-          "reasoning_effort": "xhigh"
-        }
-      },
-      "gpt_54_high": {
-        "label": "GPT-5.4 high",
-        "latest": {
-          "date": "2026-07-03-am",
-          "score": 75.0,
-          "model": "gpt-5.4",
-          "reasoning_effort": "high"
-        }
-      }
+    {
+      "at": "2026-07-21T10:00:00+08:00",
+      "points": [
+        {"model":"gpt-5.6-sol","effort":"ultra","iq":100},
+        {"model":"gpt-5.6-terra","effort":"ultra","iq":80}
+      ]
+    },
+    {
+      "at": "2026-07-22T03:00:00+08:00",
+      "points": [{"model":"gpt-5.6-sol","effort":"ultra","iq":105}]
+    },
+    {
+      "at": "2026-07-22T03:00:00+08:00",
+      "points": [{"model":"gpt-5.6-sol","effort":"ultra","iq":106}]
+    },
+    {
+      "at": "2026-07-23T08:00:00+08:00",
+      "points": [
+        {"model":"gpt-5.6-sol","effort":"ultra","iq":107},
+        {"model":"gpt-5.6-terra","effort":"ultra","iq":99}
+      ]
     }
-  },
-  "quota_radar": {
-    "updated_at": "2020-01-01T00:00:00Z"
-  }
+  ]
 }
 """

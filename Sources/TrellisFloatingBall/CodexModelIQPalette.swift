@@ -3,37 +3,34 @@ import AppKit
 enum CodexModelIQPalette {
     struct Style {
         let tint: NSColor
-        let labelBackground: NSColor
     }
 
     static let defaultHex = 0x64748B
 
     private static let fallbackColors: [String: Int] = [
-        "gpt_56_sol_max": 0xFACC15,
-        "gpt_56_sol_ultra": 0x16A34A,
-        "gpt_56_sol_xhigh": 0xEAB308,
-        "gpt_56_sol_high": 0xD97706,
-        "gpt_56_sol_medium": 0xB45309,
         "gpt_56_sol_low": 0x92400E,
+        "gpt_56_sol_medium": 0xB45309,
+        "gpt_56_sol_high": 0xD97706,
+        "gpt_56_sol_xhigh": 0xEAB308,
+        "gpt_56_sol_max": 0xFACC15,
+        "gpt_56_sol_ultra": 0xFDE047,
+        "gpt_56_terra_low": 0x1E3A8A,
+        "gpt_56_terra_medium": 0x1D4ED8,
+        "gpt_56_terra_high": 0x2563EB,
+        "gpt_56_terra_xhigh": 0x3B82F6,
         "gpt_56_terra_max": 0x60A5FA,
-        "gpt_56_terra_xhigh": 0x60A5FA,
-        "gpt_56_terra_medium": 0x2563EB,
+        "gpt_56_terra_ultra": 0x93C5FD,
+        "gpt_56_luna_low": 0x9F1239,
+        "gpt_56_luna_medium": 0xBE123C,
+        "gpt_56_luna_high": 0xE11D48,
+        "gpt_56_luna_xhigh": 0xF43F5E,
         "gpt_56_luna_max": 0xFB7185,
-        "gpt_56_luna_medium": 0xD61F45,
-        "gpt_55_xhigh": 0x16A34A,
-        "gpt_55_high": 0x2563EB,
-        "gpt_55_medium": 0xD97706,
-        "gpt_55_low": 0x0891B2,
-        "gpt_54_xhigh": 0x7C3AED,
-        "gpt_54_high": 0xDC2626
+        "gpt_55_high": 0x22C55E,
+        "gpt_55_xhigh": 0x4ADE80
     ]
 
     static func style(colorHex: Int) -> Style {
-        let tint = NSColor(hex: colorHex)
-        return Style(
-            tint: tint,
-            labelBackground: tint.blended(withFraction: 0.88, of: .white) ?? .white
-        )
+        Style(tint: NSColor(hex: colorHex))
     }
 
     static func fallbackHex(modelKey: String?, name: String) -> Int {

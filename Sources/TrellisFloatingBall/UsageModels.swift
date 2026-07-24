@@ -124,23 +124,52 @@ struct UsageTrendPoint: Equatable {
     let tokens: Int?
 }
 
+struct CodexModelIQTrendPoint: Equatable {
+    let timestamp: Date
+    let score: Double?
+}
+
 struct CodexModelIQItem: Equatable {
     let name: String
     let score: Double
     let colorHex: Int
     let modelKey: String?
+    let trend: [CodexModelIQTrendPoint]
 
-    init(name: String, score: Double, colorHex: Int, modelKey: String? = nil) {
+    init(
+        name: String,
+        score: Double,
+        colorHex: Int,
+        modelKey: String? = nil,
+        trend: [CodexModelIQTrendPoint] = []
+    ) {
         self.name = name
         self.score = score
         self.colorHex = colorHex
         self.modelKey = modelKey
+        self.trend = trend
     }
 }
 
 struct CodexModelIQSnapshot: Equatable {
     let updatedAtText: String
+    let trendStart: Date
+    let trendEnd: Date
     let items: [CodexModelIQItem]
+    let isStale: Bool
+
+    func markingUpdateFailed() -> CodexModelIQSnapshot {
+        guard isStale == false else {
+            return self
+        }
+        return CodexModelIQSnapshot(
+            updatedAtText: updatedAtText,
+            trendStart: trendStart,
+            trendEnd: trendEnd,
+            items: items,
+            isStale: true
+        )
+    }
 }
 
 struct SubscriptionDisplayItem: Equatable {

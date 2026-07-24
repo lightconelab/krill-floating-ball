@@ -25,6 +25,7 @@ enum UsageAggregator {
             statsRangeContext: bundle.statsRangeContext,
             previous: previous,
             codexModelIQ: bundle.codexModelIQ,
+            codexModelIQDidFail: bundle.codexModelIQDidFail,
             now: now,
             lastRefresh: now,
             isLoading: false,
@@ -45,6 +46,7 @@ enum UsageAggregator {
             statsRangeContext: statsRangeContext,
             previous: previous,
             codexModelIQ: previous.codexModelIQ,
+            codexModelIQDidFail: false,
             now: now,
             lastRefresh: previous.lastRefresh,
             isLoading: true,
@@ -59,6 +61,7 @@ enum UsageAggregator {
         statsRangeContext: StatsRangeContext,
         previous: UsageSnapshot?,
         codexModelIQ: CodexModelIQSnapshot?,
+        codexModelIQDidFail: Bool,
         now: Date,
         lastRefresh: Date?,
         isLoading: Bool,
@@ -153,7 +156,10 @@ enum UsageAggregator {
         let cost = statsPayload.map { decimal($0.totalCostUsd) } ?? previousSnapshot?.todayCost
         let requests = statsPayload?.totalRequests ?? previousSnapshot?.requestCount
         let tokens = statsPayload?.totalTokens ?? previousSnapshot?.totalTokens
-        let modelIQ = codexModelIQ ?? previous?.codexModelIQ
+        let modelIQ = codexModelIQ
+            ?? previous?.codexModelIQ.map { previousSnapshot in
+                codexModelIQDidFail ? previousSnapshot.markingUpdateFailed() : previousSnapshot
+            }
 
         return UsageSnapshot(
             primaryMode: primaryMode,

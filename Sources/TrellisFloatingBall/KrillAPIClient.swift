@@ -45,25 +45,33 @@ struct APIBundle {
     let stats: StatsEnvelope
     let statsRangeContext: StatsRangeContext
     let codexModelIQ: CodexModelIQSnapshot?
+    let codexModelIQDidFail: Bool
 }
 
 final class KrillAPIClient: @unchecked Sendable {
+    private enum KrillService {
+        static let origin = "https://www.krill-ai.net"
+        static let loginURL = URL(string: "\(origin)/api/auth/login")!
+        static let subscriptionURL = URL(string: "\(origin)/api/subscription")!
+        static let statsURL = URL(string: "\(origin)/api/request-logs/stats")!
+
+        static func referer(_ path: String) -> String {
+            "\(origin)\(path)"
+        }
+    }
+
     fileprivate enum Network {
         static let requestTimeout: TimeInterval = 12
         static let resourceTimeout: TimeInterval = 20
         static let codexRadarTimeout: TimeInterval = 5
-        static let codexModelIQCacheTTL: TimeInterval = 120
+        static let codexModelIQCacheTTL: TimeInterval = 600
         static let retryDelayNanoseconds: UInt64 = 350_000_000
         static let sampledTrendLimit = 32
         static let chunkedStatsThreshold: TimeInterval = 7 * 86_400
         static let statsChunkLength: TimeInterval = 7 * 86_400
     }
 
-    private let loginURL = URL(string: "https://www.krill-ai.com/api/auth/login")!
-    private let subscriptionURL = URL(string: "https://www.krill-ai.com/api/subscription")!
-    private let statsURL = URL(string: "https://www.krill-ai.com/api/request-logs/stats")!
-    private let codexRadarHTMLURL = URL(string: "https://codexradar.com/")!
-    private let codexRadarSummaryURL = URL(string: "https://codexradar.com/current.json")!
+    private let codexRadarTrendURL = URL(string: "https://codexradar.com/data/intelligence-efficiency.json")!
     private let session: URLSession
     private let fingerprintStore: KrillFingerprintStore
     private let codingLock = NSLock()
@@ -96,13 +104,13 @@ final class KrillAPIClient: @unchecked Sendable {
     }
 
     func login(credentials: KrillCredentials) async throws -> String {
-        var request = URLRequest(url: loginURL)
+        var request = URLRequest(url: KrillService.loginURL)
         request.httpMethod = "POST"
         request.timeoutInterval = Network.requestTimeout
         applyLoginHeaders(to: &request)
-        applyBrowserFetchHeaders(to: &request, referer: "https://www.krill-ai.com/login")
+        applyBrowserFetchHeaders(to: &request, referer: KrillService.referer("/login"))
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
+        request.setValue(KrillService.origin, forHTTPHeaderField: "origin")
         request.httpBody = try encode(LoginRequestPayload(
             email: credentials.email,
             password: credentials.password
@@ -114,11 +122,11 @@ final class KrillAPIClient: @unchecked Sendable {
     }
 
     func fetchSubscription(token: String) async throws -> SubscriptionEnvelope {
-        var request = URLRequest(url: subscriptionURL)
+        var request = URLRequest(url: KrillService.subscriptionURL)
         request.httpMethod = "GET"
         request.timeoutInterval = Network.requestTimeout
         applyCommonHeaders(to: &request, token: token)
-        request.setValue("https://www.krill-ai.com/app/profile", forHTTPHeaderField: "referer")
+        request.setValue(KrillService.referer("/app/profile"), forHTTPHeaderField: "referer")
 
         let (data, response) = try await loadData(for: request)
         try validate(response, data: data, allowUnauthorized: true)
@@ -147,90 +155,35 @@ final class KrillAPIClient: @unchecked Sendable {
             releaseUnusedHeapMemory()
         }
 
-        async let htmlSource = fetchCodexModelIQFromHTML()
-        async let summarySnapshot = fetchCodexModelIQFromSummary()
-
-        let htmlResult: Result<CodexModelIQHTMLSource, Error>
-        do {
-            htmlResult = .success(try await htmlSource)
-        } catch {
-            htmlResult = .failure(error)
-        }
-
-        let summaryResult: Result<CodexModelIQSnapshot, Error>
-        do {
-            summaryResult = .success(try await summarySnapshot)
-        } catch {
-            summaryResult = .failure(error)
-        }
-
-        let snapshot: CodexModelIQSnapshot
-        switch (summaryResult, htmlResult) {
-        case let (.success(summary), .success(html)):
-            snapshot = CodexModelIQSnapshotMerger.applyColors(
-                html.colorsByModelKey,
-                to: summary
-            )
-        case let (.success(summary), .failure):
-            snapshot = summary
-        case let (.failure(summaryError), .success(html)):
-            guard let fallbackSnapshot = html.snapshot else {
-                throw summaryError
-            }
-            snapshot = fallbackSnapshot
-        case let (.failure(summaryError), .failure):
-            throw summaryError
-        }
-
-        cacheCodexModelIQ(snapshot)
-        return snapshot
-    }
-
-    private func fetchCodexModelIQFromHTML() async throws -> CodexModelIQHTMLSource {
-        var request = URLRequest(url: codexRadarHTMLURL)
-        request.httpMethod = "GET"
-        request.timeoutInterval = Network.codexRadarTimeout
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "accept")
-        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "accept-language")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
-        request.setValue("no-cache", forHTTPHeaderField: "cache-control")
-        request.setValue("no-cache", forHTTPHeaderField: "pragma")
-
-        let (data, response) = try await loadData(for: request)
-        try validate(response, data: data, allowUnauthorized: false)
-        guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
-            throw KrillAPIError.invalidResponse
-        }
-        return try autoreleasepool {
-            try CodexModelIQHTMLParser.parseSource(html)
-        }
-    }
-
-    private func fetchCodexModelIQFromSummary() async throws -> CodexModelIQSnapshot {
-        var request = URLRequest(url: codexRadarSummaryURL)
+        var request = URLRequest(url: codexRadarTrendURL)
         request.httpMethod = "GET"
         request.timeoutInterval = Network.codexRadarTimeout
         request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "accept")
         request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "accept-language")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", forHTTPHeaderField: "user-agent")
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+            forHTTPHeaderField: "user-agent"
+        )
         request.setValue("no-cache", forHTTPHeaderField: "cache-control")
         request.setValue("no-cache", forHTTPHeaderField: "pragma")
 
         let (data, response) = try await loadData(for: request)
         try validate(response, data: data, allowUnauthorized: false)
-        return try autoreleasepool {
-            try CodexModelIQSummaryJSONParser.parse(data)
+        let snapshot = try autoreleasepool {
+            try CodexModelIQTrendJSONParser.parse(data)
         }
+        cacheCodexModelIQ(snapshot)
+        return snapshot
     }
 
     private func fetchStatsChunk(token: String, range: StatsRangeContext) async throws -> StatsEnvelope {
-        var request = URLRequest(url: statsURL)
+        var request = URLRequest(url: KrillService.statsURL)
         request.httpMethod = "POST"
         request.timeoutInterval = Network.resourceTimeout
         applyCommonHeaders(to: &request, token: token)
-        request.setValue("https://www.krill-ai.com/app/activity", forHTTPHeaderField: "referer")
+        request.setValue(KrillService.referer("/app/activity"), forHTTPHeaderField: "referer")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.setValue("https://www.krill-ai.com", forHTTPHeaderField: "origin")
+        request.setValue(KrillService.origin, forHTTPHeaderField: "origin")
 
         let payload = StatsRequestPayload(
             startTime: LocalProtocolDateFormatter.string(from: range.start),
@@ -299,7 +252,7 @@ final class KrillAPIClient: @unchecked Sendable {
 
     private func applyCommonHeaders(to request: inout URLRequest, token: String) {
         applyLoginHeaders(to: &request)
-        applyBrowserFetchHeaders(to: &request, referer: "https://www.krill-ai.com/app")
+        applyBrowserFetchHeaders(to: &request, referer: KrillService.referer("/app"))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
     }
 
@@ -667,385 +620,161 @@ enum LocalProtocolDateFormatter {
     }
 }
 
-struct CodexModelIQHTMLSource {
-    let snapshot: CodexModelIQSnapshot?
-    let colorsByModelKey: [String: Int]
-}
+enum CodexModelIQTrendJSONParser {
+    private static let historyWindow: TimeInterval = 48 * 60 * 60
 
-enum CodexModelIQHTMLParser {
-    static func parse(_ html: String) throws -> CodexModelIQSnapshot {
-        try parseSnapshot(html, modelColors: extractModelColors(from: html))
-    }
-
-    static func parseSource(_ html: String) throws -> CodexModelIQHTMLSource {
-        let modelColors = extractModelColors(from: html)
-        let snapshot = try? parseSnapshot(html, modelColors: modelColors)
-        guard snapshot != nil || modelColors.isEmpty == false else {
-            throw KrillAPIError.missingData
-        }
-        return CodexModelIQHTMLSource(
-            snapshot: snapshot,
-            colorsByModelKey: modelColors
-        )
-    }
-
-    static func parseColors(_ html: String) -> [String: Int] {
-        extractModelColors(from: html)
-    }
-
-    private static func parseSnapshot(
-        _ html: String,
-        modelColors: [String: Int]
-    ) throws -> CodexModelIQSnapshot {
-        let updateText = try extractUpdateText(from: html)
-        let items = try extractItems(from: html, modelColors: modelColors)
-        guard items.isEmpty == false else {
-            throw KrillAPIError.missingData
-        }
-
-        let sortedItems = items.enumerated()
-            .sorted { lhs, rhs in
-                if lhs.element.score == rhs.element.score {
-                    return lhs.offset < rhs.offset
-                }
-                return lhs.element.score > rhs.element.score
-            }
-            .map(\.element)
-
-        return CodexModelIQSnapshot(updatedAtText: updateText, items: sortedItems)
-    }
-
-    private static func extractUpdateText(from html: String) throws -> String {
-        let pattern = #"<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?<h2>[\s\S]*?<span[^>]*>([^<]+)</span>"#
-        guard let raw = firstCapture(in: html, pattern: pattern) else {
-            throw KrillAPIError.missingData
-        }
-        return normalizedUpdateText(raw)
-    }
-
-    private static func extractItems(
-        from html: String,
-        modelColors: [String: Int]
-    ) throws -> [CodexModelIQItem] {
-        let section = firstCapture(
-            in: html,
-            pattern: #"(<section[^>]*class="[^"]*\bmodel-iq\b[^"]*"[\s\S]*?</section>)"#
-        ) ?? html
-        let summary = firstCapture(
-            in: section,
-            pattern: #"(<div[^>]*class="[^"]*\bmodel-iq-score-summary\b[^"]*"[^>]*>[\s\S]*?</article>)"#
-        ) ?? section
-        let pattern = #"<div([^>]*class="[^"]*\bmodel-iq-score-chip\b[^"]*"[^>]*)>[\s\S]*?<span[^>]*>([^<]+)</span>[\s\S]*?<strong[^>]*>([^<]+)</strong>[\s\S]*?</div>"#
-        let regex = try NSRegularExpression(
-            pattern: pattern,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        )
-        let range = NSRange(summary.startIndex..<summary.endIndex, in: summary)
-        return regex.matches(in: summary, range: range).compactMap { match in
-            guard match.numberOfRanges >= 4,
-                  let attributesRange = Range(match.range(at: 1), in: summary),
-                  let nameRange = Range(match.range(at: 2), in: summary),
-                  let scoreRange = Range(match.range(at: 3), in: summary)
-            else {
-                return nil
-            }
-            let attributes = String(summary[attributesRange])
-            let name = normalizedText(String(summary[nameRange]))
-            let scoreText = normalizedText(String(summary[scoreRange]))
-            guard name.isEmpty == false,
-                  let score = Double(scoreText)
-            else {
-                return nil
-            }
-            let modelKey = firstCapture(
-                in: attributes,
-                pattern: #"\bdata-model-key\s*=\s*"([^"]+)""#
-            )
-            let colorHex = modelKey.flatMap { modelColors[CodexModelIQPalette.normalizedKey($0)] }
-                ?? CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name)
-            return CodexModelIQItem(
-                name: name,
-                score: score,
-                colorHex: colorHex,
-                modelKey: modelKey.map(CodexModelIQPalette.normalizedKey)
-            )
-        }
-    }
-
-    private static func extractModelColors(from html: String) -> [String: Int] {
-        guard let styleRegex = try? NSRegularExpression(
-            pattern: #"<style[^>]*>([\s\S]*?)</style>"#,
-            options: [.caseInsensitive]
-        ),
-        let ruleRegex = try? NSRegularExpression(
-            pattern: #"([^{}]+)\{([^{}]*)\}"#,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ),
-        let keyRegex = try? NSRegularExpression(
-            pattern: #"\.model-iq-score-chip-([A-Za-z0-9_]+)"#,
-            options: [.caseInsensitive]
-        ),
-        let colorRegex = try? NSRegularExpression(
-            pattern: #"(?:^|;)\s*(?:--model-iq-card-color|color)\s*:\s*#([0-9A-Fa-f]{6})\b"#,
-            options: [.caseInsensitive]
-        ) else {
-            return [:]
-        }
-
-        let htmlRange = NSRange(html.startIndex..<html.endIndex, in: html)
-        var colors: [String: Int] = [:]
-        for styleMatch in styleRegex.matches(in: html, range: htmlRange) {
-            guard styleMatch.numberOfRanges >= 2,
-                  let styleRange = Range(styleMatch.range(at: 1), in: html)
-            else {
-                continue
-            }
-            let stylesheet = String(html[styleRange])
-            let stylesheetRange = NSRange(stylesheet.startIndex..<stylesheet.endIndex, in: stylesheet)
-            for rule in ruleRegex.matches(in: stylesheet, range: stylesheetRange) {
-                guard rule.numberOfRanges >= 3,
-                      let selectorSourceRange = Range(rule.range(at: 1), in: stylesheet),
-                      let bodySourceRange = Range(rule.range(at: 2), in: stylesheet)
-                else {
-                    continue
-                }
-                let selectors = String(stylesheet[selectorSourceRange])
-                guard selectors.range(of: ".model-iq-score-chip-", options: .caseInsensitive) != nil else {
-                    continue
-                }
-                let body = String(stylesheet[bodySourceRange])
-                let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
-                guard let colorMatch = colorRegex.firstMatch(in: body, range: bodyRange),
-                      colorMatch.numberOfRanges >= 2,
-                      let colorRange = Range(colorMatch.range(at: 1), in: body),
-                      let colorHex = Int(body[colorRange], radix: 16)
-                else {
-                    continue
-                }
-
-                let selectorRange = NSRange(selectors.startIndex..<selectors.endIndex, in: selectors)
-                for keyMatch in keyRegex.matches(in: selectors, range: selectorRange) {
-                    guard keyMatch.numberOfRanges >= 2,
-                          let keyRange = Range(keyMatch.range(at: 1), in: selectors)
-                    else {
-                        continue
-                    }
-                    colors[CodexModelIQPalette.normalizedKey(String(selectors[keyRange]))] = colorHex
-                }
-            }
-        }
-        return colors
-    }
-
-    private static func normalizedUpdateText(_ text: String) -> String {
-        let normalized = normalizedText(text)
-        guard let regex = try? NSRegularExpression(
-            pattern: #"(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})"#,
-            options: []
-        ) else {
-            return normalized
-        }
-        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        guard let match = regex.firstMatch(in: normalized, range: range),
-              match.numberOfRanges >= 5,
-              let monthRange = Range(match.range(at: 1), in: normalized),
-              let dayRange = Range(match.range(at: 2), in: normalized),
-              let hourRange = Range(match.range(at: 3), in: normalized),
-              let minuteRange = Range(match.range(at: 4), in: normalized),
-              let month = Int(normalized[monthRange]),
-              let day = Int(normalized[dayRange]),
-              let hour = Int(normalized[hourRange]),
-              let minute = Int(normalized[minuteRange])
-        else {
-            return normalized
-        }
-        return String(format: "%02d-%02d %02d:%02d", month, day, hour, minute)
-    }
-
-    private static func firstCapture(in text: String, pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(
-            pattern: pattern,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ) else {
-            return nil
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              match.numberOfRanges >= 2,
-              let captureRange = Range(match.range(at: 1), in: text)
-        else {
-            return nil
-        }
-        return String(text[captureRange])
-    }
-
-    private static func normalizedText(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-enum CodexModelIQSummaryJSONParser {
     static func parse(_ data: Data) throws -> CodexModelIQSnapshot {
-        let envelope = try JSONDecoder().decode(CodexRadarSummaryEnvelope.self, from: data)
-        guard let modelIQ = envelope.modelIQ else {
-            throw KrillAPIError.missingData
-        }
-
-        var items: [CodexModelIQItem] = []
-        if let latest = modelIQ.latest {
-            let name = normalizedModelName(label: nil, latest: latest)
-            let modelKey = CodexModelIQPalette.normalizedKey("\(latest.model)-\(latest.reasoningEffort)")
-            items.append(CodexModelIQItem(
-                name: name,
-                score: latest.score,
-                colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name),
-                modelKey: modelKey
-            ))
-        }
-        if let comparisons = modelIQ.comparisons {
-            items.append(contentsOf: comparisons.compactMap { modelKey, comparison in
-                guard let latest = comparison.latest else {
-                    return nil
-                }
-                let name = normalizedModelName(label: comparison.label, latest: latest)
-                return CodexModelIQItem(
-                    name: name,
-                    score: latest.score,
-                    colorHex: CodexModelIQPalette.fallbackHex(modelKey: modelKey, name: name),
-                    modelKey: CodexModelIQPalette.normalizedKey(modelKey)
-                )
-            })
-        }
-
-        guard items.isEmpty == false else {
-            throw KrillAPIError.missingData
-        }
-
-        let sortedItems = items.enumerated()
-            .sorted { lhs, rhs in
-                if lhs.element.score == rhs.element.score {
-                    let lhsRank = modelDisplayRank(lhs.element.name)
-                    let rhsRank = modelDisplayRank(rhs.element.name)
-                    if lhsRank == rhsRank {
-                        return lhs.offset < rhs.offset
-                    }
-                    return lhsRank < rhsRank
-                }
-                return lhs.element.score > rhs.element.score
+        let envelope = try JSONDecoder().decode(CodexRadarTrendEnvelope.self, from: data)
+        let history = envelope.history.compactMap { snapshot -> (Date, [String: Double])? in
+            guard let timestamp = RadarUpdateFormatter.parse(snapshot.at) else {
+                return nil
             }
-            .map(\.element)
-
-        let updatedAtText = RadarUpdateFormatter.format(
-            iso8601: modelIQ.updatedAt,
-            fallbackDateCode: modelIQ.latest?.date
-        )
-        return CodexModelIQSnapshot(updatedAtText: updatedAtText, items: sortedItems)
-    }
-
-    private static func normalizedModelName(label: String?, latest: CodexRadarModelSnapshot) -> String {
-        if let label, label.isEmpty == false {
-            return label.replacingOccurrences(of: " ", with: "-")
+            return (timestamp, scoresByModelKey(snapshot.points))
         }
-        let model = latest.model.uppercased()
-        let effort = latest.reasoningEffort.lowercased()
-        return "\(model)-\(effort)"
-    }
+        let trendEnd = RadarUpdateFormatter.parse(envelope.sourceUpdatedAt)
+            ?? history.map(\.0).max()
+            ?? Date()
+        let trendStart = trendEnd.addingTimeInterval(-historyWindow)
 
-    private static func modelDisplayRank(_ name: String) -> Int {
-        switch name.lowercased() {
-        case "gpt-5.5-xhigh":
-            return 0
-        case "gpt-5.5-high":
-            return 1
-        case "gpt-5.5-medium":
-            return 2
-        case "gpt-5.5-low":
-            return 3
-        case "gpt-5.4-xhigh":
-            return 4
-        case "gpt-5.4-high":
-            return 5
-        default:
-            return 99
-        }
-    }
-}
-
-enum CodexModelIQSnapshotMerger {
-    static func applyColors(
-        _ colorsByModelKey: [String: Int],
-        to primary: CodexModelIQSnapshot
-    ) -> CodexModelIQSnapshot {
-        let normalizedColors = colorsByModelKey.reduce(into: [String: Int]()) { colors, entry in
-            colors[CodexModelIQPalette.normalizedKey(entry.key)] = entry.value
+        var scoresAtTime: [Date: [String: Double]] = [:]
+        for (timestamp, scores) in history where timestamp >= trendStart && timestamp <= trendEnd {
+            scoresAtTime[timestamp, default: [:]].merge(scores) { _, latest in latest }
         }
 
-        let mergedItems = primary.items.map { item in
-            let modelKey = item.modelKey.map(CodexModelIQPalette.normalizedKey)
-            let colorHex = modelKey.flatMap { normalizedColors[$0] }
-                ?? normalizedColors[CodexModelIQPalette.normalizedKey(item.name)]
-                ?? item.colorHex
+        let current = envelope.points.compactMap { point -> CurrentPoint? in
+            guard let model = point.model,
+                  let effort = point.effort,
+                  let score = point.iq,
+                  score.isFinite
+            else {
+                return nil
+            }
+            let modelKey = normalizedModelKey(model: model, effort: effort)
+            return CurrentPoint(model: model, effort: effort, modelKey: modelKey, score: score)
+        }
+        guard current.isEmpty == false else {
+            throw KrillAPIError.missingData
+        }
+
+        var uniqueCurrent: [String: CurrentPoint] = [:]
+        for point in current {
+            uniqueCurrent[point.modelKey] = point
+        }
+        let currentScores = uniqueCurrent.mapValues(\.score)
+        scoresAtTime[trendEnd, default: [:]].merge(currentScores) { _, latest in latest }
+        let timestamps = scoresAtTime.keys.sorted()
+
+        let sortedItems = uniqueCurrent.values.map { currentPoint in
+            let name = displayName(model: currentPoint.model, effort: currentPoint.effort)
+            let trend = timestamps.map { timestamp in
+                CodexModelIQTrendPoint(
+                    timestamp: timestamp,
+                    score: scoresAtTime[timestamp]?[currentPoint.modelKey]
+                )
+            }
             return CodexModelIQItem(
-                name: item.name,
-                score: item.score,
-                colorHex: colorHex,
-                modelKey: item.modelKey
+                name: name,
+                score: currentPoint.score,
+                colorHex: CodexModelIQPalette.fallbackHex(modelKey: currentPoint.modelKey, name: name),
+                modelKey: currentPoint.modelKey,
+                trend: trend
             )
         }
-        return CodexModelIQSnapshot(updatedAtText: primary.updatedAtText, items: mergedItems)
+        .sorted { lhs, rhs in
+            if lhs.score == rhs.score {
+                let lhsKey = lhs.modelKey ?? lhs.name
+                let rhsKey = rhs.modelKey ?? rhs.name
+                return lhsKey < rhsKey
+            }
+            return lhs.score > rhs.score
+        }
+
+        return CodexModelIQSnapshot(
+            updatedAtText: RadarUpdateFormatter.format(trendEnd),
+            trendStart: trendStart,
+            trendEnd: trendEnd,
+            items: sortedItems,
+            isStale: false
+        )
+    }
+
+    private struct CurrentPoint {
+        let model: String
+        let effort: String
+        let modelKey: String
+        let score: Double
+    }
+
+    private static func scoresByModelKey(_ points: [CodexRadarTrendPoint]) -> [String: Double] {
+        points.reduce(into: [:]) { scores, point in
+            guard let model = point.model,
+                  let effort = point.effort,
+                  let score = point.iq,
+                  score.isFinite
+            else {
+                return
+            }
+            scores[normalizedModelKey(model: model, effort: effort)] = score
+        }
+    }
+
+    private static func normalizedModelKey(model: String, effort: String) -> String {
+        CodexModelIQPalette.normalizedKey("\(model)-\(effort)")
+    }
+
+    private static func displayName(model: String, effort: String) -> String {
+        let family = model.split(separator: "-").map { component -> String in
+            switch component.lowercased() {
+            case "gpt":
+                return "GPT"
+            case "sol":
+                return "Sol"
+            case "terra":
+                return "Terra"
+            case "luna":
+                return "Luna"
+            default:
+                return String(component)
+            }
+        }.joined(separator: "-")
+        return "\(family)-\(effort.lowercased())"
     }
 }
 
 private enum RadarUpdateFormatter {
-    private static let formatterLock = NSLock()
-    private static let formatter: DateFormatter = {
+    private static let lock = NSLock()
+    private static let displayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+    nonisolated(unsafe) private static let fractionalISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 
-    static func format(iso8601: String?, fallbackDateCode: String?) -> String {
-        if let iso8601,
-           let date = parseISO8601(iso8601) {
-            formatterLock.lock()
-            defer { formatterLock.unlock() }
-            return formatter.string(from: date)
-        }
-        if let fallbackDateCode, fallbackDateCode.isEmpty == false {
-            return normalizedFallbackDateCode(fallbackDateCode)
-        }
-        return "--"
+    static func format(_ date: Date) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return displayFormatter.string(from: date)
     }
 
-    private static func normalizedFallbackDateCode(_ text: String) -> String {
-        let normalized = text.replacingOccurrences(of: "_", with: "-")
-        let parts = normalized.split(separator: "-")
-        guard parts.count >= 3,
-              let year = Int(parts[0]),
-              let month = Int(parts[1]),
-              let day = Int(parts[2])
-        else {
-            return text
+    static func parse(_ text: String?) -> Date? {
+        guard let text, text.isEmpty == false else {
+            return nil
         }
-        return String(format: "%04d-%02d-%02d --:--:--", year, month, day)
-    }
-
-    private static func parseISO8601(_ text: String) -> Date? {
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        isoFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-        if let date = isoFormatter.date(from: text) {
-            return date
-        }
-        let fallbackFormatter = ISO8601DateFormatter()
-        fallbackFormatter.formatOptions = [.withInternetDateTime]
-        fallbackFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return fallbackFormatter.date(from: text)
+        lock.lock()
+        defer { lock.unlock() }
+        return fractionalISOFormatter.date(from: text) ?? isoFormatter.date(from: text)
     }
 }
 
@@ -1071,43 +800,45 @@ struct SubscriptionEnvelope: Decodable {
     }
 }
 
-private struct CodexRadarSummaryEnvelope: Decodable {
-    let modelIQ: CodexRadarModelIQSummary?
+private struct CodexRadarTrendEnvelope: Decodable {
+    let sourceUpdatedAt: String?
+    let points: [CodexRadarTrendPoint]
+    let history: [CodexRadarTrendSnapshot]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sourceUpdatedAt = try container.decodeIfPresent(String.self, forKey: .sourceUpdatedAt)
+        points = try container.decodeIfPresent([CodexRadarTrendPoint].self, forKey: .points) ?? []
+        history = try container.decodeIfPresent([CodexRadarTrendSnapshot].self, forKey: .history) ?? []
+    }
 
     enum CodingKeys: String, CodingKey {
-        case modelIQ = "model_iq"
+        case sourceUpdatedAt = "source_updated_at"
+        case points
+        case history
     }
 }
 
-private struct CodexRadarModelIQSummary: Decodable {
-    let updatedAt: String?
-    let latest: CodexRadarModelSnapshot?
-    let comparisons: [String: CodexRadarModelComparison]?
+private struct CodexRadarTrendSnapshot: Decodable {
+    let at: String?
+    let points: [CodexRadarTrendPoint]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        at = try container.decodeIfPresent(String.self, forKey: .at)
+        points = try container.decodeIfPresent([CodexRadarTrendPoint].self, forKey: .points) ?? []
+    }
 
     enum CodingKeys: String, CodingKey {
-        case updatedAt = "updated_at"
-        case latest
-        case comparisons
+        case at
+        case points
     }
 }
 
-private struct CodexRadarModelComparison: Decodable {
-    let label: String?
-    let latest: CodexRadarModelSnapshot?
-}
-
-private struct CodexRadarModelSnapshot: Decodable {
-    let date: String?
-    let score: Double
-    let model: String
-    let reasoningEffort: String
-
-    enum CodingKeys: String, CodingKey {
-        case date
-        case score
-        case model
-        case reasoningEffort = "reasoning_effort"
-    }
+private struct CodexRadarTrendPoint: Decodable {
+    let model: String?
+    let effort: String?
+    let iq: Double?
 }
 
 struct SubscriptionPayload: Decodable {

@@ -300,12 +300,21 @@ final class UsageStore {
             requestedRange: requestedStatsRange
         )
         let stats = try await client.fetchStats(token: token, range: rangeContext)
-        let codexModelIQ = try? await client.fetchCodexModelIQ(forceRefresh: forceCodexModelIQRefresh)
+        let codexModelIQ: CodexModelIQSnapshot?
+        let codexModelIQDidFail: Bool
+        do {
+            codexModelIQ = try await client.fetchCodexModelIQ(forceRefresh: forceCodexModelIQRefresh)
+            codexModelIQDidFail = false
+        } catch {
+            codexModelIQ = nil
+            codexModelIQDidFail = true
+        }
         return APIBundle(
             subscription: subscription,
             stats: stats,
             statsRangeContext: rangeContext,
-            codexModelIQ: codexModelIQ
+            codexModelIQ: codexModelIQ,
+            codexModelIQDidFail: codexModelIQDidFail
         )
     }
 
